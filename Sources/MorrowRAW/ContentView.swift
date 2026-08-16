@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1890,6 +1891,13 @@ final class PhotoThumbnailLoader {
         if let cached = PhotoThumbnailCache.shared.image(for: url) {
             return cached
         }
+        // Camera RAW files commonly contain an embedded JPEG preview. Reading
+        // it through ImageIO avoids constructing a Core Image RAW graph just
+        // to paint the first thumbnail in the main canvas.
+        if let embedded = Self.loadEmbeddedThumbnail(url: url) {
+            PhotoThumbnailCache.shared.store(embedded, for: url)
+            return embedded
+        }
         guard let source = try? decoder.decodePreview(url: url, maxDimension: 220) else { return nil }
         guard let image = renderer.makePreview(source, adjustments: ImageAdjustments(), maxDimension: 220) else { return nil }
         PhotoThumbnailCache.shared.store(image, for: url)
@@ -1898,12 +1906,28 @@ final class PhotoThumbnailLoader {
 
     func loadCGImageAsync(url: URL) async -> CGImage? {
         await inFlight.image(for: url) { [decoder, renderer] in
+            if let embedded = Self.loadEmbeddedThumbnail(url: url) {
+                PhotoThumbnailCache.shared.store(embedded, for: url)
+                return embedded
+            }
             guard let source = try? decoder.decodePreview(url: url, maxDimension: 220),
                   let image = renderer.makePreview(source, adjustments: ImageAdjustments(), maxDimension: 220)
             else { return nil }
             PhotoThumbnailCache.shared.store(image, for: url)
             return image
         }
+    }
+
+    private static func loadEmbeddedThumbnail(url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let isRaw = PhotoLibrary.supportedExtensions.contains(url.pathExtension.lowercased()) &&
+            !["jpg", "jpeg", "png", "tif", "tiff", "bmp", "heic"].contains(url.pathExtension.lowercased())
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: !isRaw,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 220
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }
 
