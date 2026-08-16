@@ -6,3 +6,7 @@ dist/
 .DS_Store
 *.xcuserstate
 DerivedData/
+
+# Keep the product README, but do not track internal notes or conversation docs.
+*.md
+!README.md

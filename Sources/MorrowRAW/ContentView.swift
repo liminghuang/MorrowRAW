@@ -79,7 +79,7 @@ final class EditorViewModel: ObservableObject {
         watermark = exportPreferences.watermark
         recentFolders = RecentFoldersStore.load()
         openURLObserver = NotificationCenter.default.addObserver(
-            forName: .awayPhotoOpenURL, object: nil, queue: .main
+            forName: .morrowRAWOpenURL, object: nil, queue: .main
         ) { [weak self] notification in
             guard let urls = notification.object as? [URL] else { return }
             Task { @MainActor [weak self] in
@@ -87,7 +87,7 @@ final class EditorViewModel: ObservableObject {
             }
         }
         terminationObserver = NotificationCenter.default.addObserver(
-            forName: .awayPhotoWillTerminate, object: nil, queue: .main
+            forName: .morrowRAWWillTerminate, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.flushPendingSave()

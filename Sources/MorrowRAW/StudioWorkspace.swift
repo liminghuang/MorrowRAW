@@ -63,7 +63,7 @@ private struct StudioToolbar: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "camera.aperture").font(.title2).foregroundStyle(StudioUI.accent)
-            Text("AwayPhoto").font(.headline)
+            Text("Morrow RAW").font(.headline)
             Divider().frame(height: 22)
             Button(StudioText.openFolder, action: model.openFolder).keyboardShortcut("o", modifiers: [.command, .shift])
             Button(StudioText.openPhoto, action: model.openPhoto).keyboardShortcut("o", modifiers: [.command])

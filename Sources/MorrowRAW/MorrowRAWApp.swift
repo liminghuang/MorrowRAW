@@ -8,11 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !urls.isEmpty else { return }
         pendingURLs = urls
-        NotificationCenter.default.post(name: .awayPhotoOpenURL, object: urls)
+        NotificationCenter.default.post(name: .morrowRAWOpenURL, object: urls)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        NotificationCenter.default.post(name: .awayPhotoWillTerminate, object: nil)
+        NotificationCenter.default.post(name: .morrowRAWWillTerminate, object: nil)
         return .terminateNow
     }
 
@@ -23,8 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension Notification.Name {
-    static let awayPhotoOpenURL = Notification.Name("MorrowRAW.openURL")
-    static let awayPhotoWillTerminate = Notification.Name("MorrowRAW.willTerminate")
+    static let morrowRAWOpenURL = Notification.Name("MorrowRAW.openURL")
+    static let morrowRAWWillTerminate = Notification.Name("MorrowRAW.willTerminate")
 }
 
 @main

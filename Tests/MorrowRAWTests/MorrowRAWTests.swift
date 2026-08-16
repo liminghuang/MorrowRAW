@@ -572,7 +572,7 @@ final class CompatibilityTests: XCTestCase {
     }
 
     func testTerminationNotificationNameIsStable() {
-        XCTAssertEqual(Notification.Name.awayPhotoWillTerminate.rawValue,
+        XCTAssertEqual(Notification.Name.morrowRAWWillTerminate.rawValue,
                        "MorrowRAW.willTerminate")
     }
 
@@ -675,7 +675,7 @@ final class CompatibilityTests: XCTestCase {
     }
 
     func testCustomPresetPersistsOnlyTonalValues() {
-        let name = "AwayPhotoTestPreset-\(UUID().uuidString)"
+        let name = "MorrowRAWTestPreset-\(UUID().uuidString)"
         var original = ImageAdjustments()
         original.exposure = 1.25
         original.cropX = 0.3
