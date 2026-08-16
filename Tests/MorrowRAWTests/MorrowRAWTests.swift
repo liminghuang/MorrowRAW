@@ -140,6 +140,25 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(model.selectedIndex, 2)
     }
 
+    @MainActor
+    func testAdjustmentBrushStrokeStoresNormalizedPointsAndSupportsUndo() {
+        let model = EditorViewModel()
+        model.beginAdjustmentBrush(at: CGPoint(x: -0.2, y: 1.2))
+        model.appendAdjustmentBrushPoint(CGPoint(x: 0.4, y: 0.6))
+        model.appendAdjustmentBrushPoint(CGPoint(x: 1.3, y: -0.1))
+        model.finishInteractiveAdjustment()
+
+        XCTAssertEqual(model.adjustments.adjustmentBrushes.count, 1)
+        XCTAssertEqual(model.adjustments.adjustmentBrushes[0].points.map(\.x), [0, 0.4, 1])
+        XCTAssertEqual(model.adjustments.adjustmentBrushes[0].points.map(\.y), [1, 0.6, 0])
+        model.undo()
+        XCTAssertTrue(model.adjustments.adjustmentBrushes.isEmpty)
+
+        model.beginAdjustmentBrush(at: CGPoint(x: 0.5, y: 0.5))
+        model.clearAdjustmentBrushes()
+        XCTAssertTrue(model.adjustments.adjustmentBrushes.isEmpty)
+    }
+
     func testNearbyThumbnailIndicesPreferAdjacentPhotosAndExcludeCurrent() {
         XCTAssertEqual(
             EditorViewModel.nearbyThumbnailIndices(around: 2, count: 6, radius: 2),
@@ -204,6 +223,13 @@ final class CompatibilityTests: XCTestCase {
             <HealSpots>
               <HealSpot><TargetX>0.4</TargetX><SourceX>0.7</SourceX><Strength>0.45</Strength></HealSpot>
             </HealSpots>
+            <AdjustmentBrushes>
+              <AdjustmentBrush>
+                <RadiusNorm>0.08</RadiusNorm><Feather>0.6</Feather>
+                <Exposure>0.5</Exposure><Highlights>-30</Highlights><Saturation>12</Saturation>
+                <Points><Point><X>0.2</X><Y>0.3</Y></Point><Point><X>0.4</X><Y>0.5</Y></Point></Points>
+              </AdjustmentBrush>
+            </AdjustmentBrushes>
           </Adjustments>
         </RawPipeDocument>
         """.data(using: .utf8)!
@@ -224,6 +250,12 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(adjustments.cropAspectRatio, "4:3")
         XCTAssertEqual(adjustments.cropWidth, 0.8)
         XCTAssertEqual(adjustments.healSpots.first?.strength, 0.45)
+        XCTAssertEqual(adjustments.adjustmentBrushes.count, 1)
+        XCTAssertEqual(adjustments.adjustmentBrushes.first?.radiusNorm, 0.08)
+        XCTAssertEqual(adjustments.adjustmentBrushes.first?.feather, 0.6)
+        XCTAssertEqual(adjustments.adjustmentBrushes.first?.points.count, 2)
+        XCTAssertEqual(adjustments.adjustmentBrushes.first?.exposure, 0.5)
+        XCTAssertEqual(adjustments.adjustmentBrushes.first?.saturation, 12)
         XCTAssertEqual(adjustments.rotation, 90)
         XCTAssertEqual(adjustments.saturation, 0)
     }
@@ -272,6 +304,102 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotNil(result)
         XCTAssertEqual(result?.width, 32)
         XCTAssertEqual(result?.height, 24)
+    }
+
+    func testRendererAppliesFeatheredAdjustmentBrushLocally() {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.2))
+            .cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        var adjustments = ImageAdjustments()
+        var brush = AdjustmentBrush(points: [
+            AdjustmentBrushPoint(x: 0.15, y: 0.2),
+            AdjustmentBrushPoint(x: 0.85, y: 0.8)
+        ])
+        brush.radiusNorm = 0.3
+        brush.feather = 0.5
+        brush.exposure = 2
+        adjustments.adjustmentBrushes = [brush]
+
+        let context = CIContext()
+        guard let result = context.createCGImage(ImageRenderer().render(source, adjustments: adjustments),
+                                                  from: source.extent),
+              let data = result.dataProvider?.data else {
+            XCTFail("Could not render adjustment brush")
+            return
+        }
+        let bytes = CFDataGetBytePtr(data)!
+        let center = (50 * result.bytesPerRow) + (50 * 4)
+        let corner = (0 * result.bytesPerRow) + (0 * 4)
+        XCTAssertGreaterThan(bytes[center], bytes[corner])
+    }
+
+    func testAdjustmentBrushPreservesPixelsOutsideMask() {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.2, blue: 0.2))
+            .cropped(to: CGRect(x: 120, y: 80, width: 160, height: 100))
+        var adjustments = ImageAdjustments()
+        var brush = AdjustmentBrush(points: [
+            AdjustmentBrushPoint(x: 0.15, y: 0.2),
+            AdjustmentBrushPoint(x: 0.85, y: 0.8)
+        ])
+        brush.radiusNorm = 0.08
+        brush.exposure = 1.0
+        adjustments.adjustmentBrushes = [brush]
+
+        let context = CIContext()
+        guard let result = context.createCGImage(ImageRenderer().render(source, adjustments: adjustments), from: source.extent),
+              let data = result.dataProvider?.data else {
+            XCTFail("Could not render adjustment brush mask")
+            return
+        }
+        let bytes = CFDataGetBytePtr(data)!
+        let top = 0 * result.bytesPerRow + 80 * 4
+        let bottom = 99 * result.bytesPerRow + 80 * 4
+        XCTAssertGreaterThan(bytes[top], 30)
+        XCTAssertGreaterThan(bytes[bottom], 30)
+    }
+
+    func testEmptyAdjustmentBrushDoesNotAlterImage() {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.3, blue: 0.4))
+            .cropped(to: CGRect(x: 0, y: 0, width: 80, height: 60))
+        var adjustments = ImageAdjustments()
+        adjustments.adjustmentBrushes = [AdjustmentBrush(points: [AdjustmentBrushPoint(x: 0.5, y: 0.5)])]
+        let renderer = ImageRenderer()
+        guard let result = renderer.makePreview(source, adjustments: adjustments),
+              let original = renderer.makePreview(source, adjustments: ImageAdjustments()),
+              let resultData = result.dataProvider?.data,
+              let originalData = original.dataProvider?.data else {
+            XCTFail("Could not render empty adjustment brush")
+            return
+        }
+        XCTAssertEqual(Data(bytes: CFDataGetBytePtr(resultData)!, count: CFDataGetLength(resultData)),
+                       Data(bytes: CFDataGetBytePtr(originalData)!, count: CFDataGetLength(originalData)))
+    }
+
+    func testAdjustmentBrushSidecarRoundTripPreservesMaskAndValues() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-brush-roundtrip-\(UUID().uuidString).xml")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var original = ImageAdjustments()
+        original.adjustmentBrushes = [AdjustmentBrush(
+            points: [AdjustmentBrushPoint(x: 0.12, y: 0.34), AdjustmentBrushPoint(x: 0.56, y: 0.78)],
+            radiusNorm: 0.091,
+            feather: 0.42,
+            exposure: -1.25,
+            contrast: 18,
+            highlights: -22,
+            shadows: 31,
+            whites: 7,
+            blacks: -12,
+            temperature: 7100,
+            tint: -9,
+            vibrance: 14,
+            saturation: -6
+        )]
+        try original.save(to: url)
+
+        var restored = ImageAdjustments()
+        try restored.load(from: url)
+        XCTAssertEqual(restored.adjustmentBrushes, original.adjustmentBrushes)
     }
 
     func testHistogramProducesNormalizedLuminanceBins() {

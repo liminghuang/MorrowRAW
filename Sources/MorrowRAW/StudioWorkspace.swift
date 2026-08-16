@@ -5,6 +5,7 @@ private enum LocalToolMode: Equatable {
     case none
     case heal
     case gradient
+    case brush
 }
 
 struct StudioWorkspace: View {
@@ -16,6 +17,7 @@ struct StudioWorkspace: View {
     @State private var geometryOpen = false
     @State private var gradientOpen = false
     @State private var healOpen = false
+    @State private var brushOpen = false
     @State private var versionsOpen = false
     @State private var localTool: LocalToolMode = .none
     @State private var pendingHealTarget: CGPoint?
@@ -32,7 +34,7 @@ struct StudioWorkspace: View {
                 StudioInspector(model: model, activeTab: $activeTab,
                                 basicOpen: $basicOpen, colorOpen: $colorOpen,
                                 detailOpen: $detailOpen, geometryOpen: $geometryOpen,
-                                gradientOpen: $gradientOpen, healOpen: $healOpen,
+                                gradientOpen: $gradientOpen, healOpen: $healOpen, brushOpen: $brushOpen,
                                 versionsOpen: $versionsOpen,
                                 localTool: $localTool, pendingHealTarget: $pendingHealTarget)
                     .frame(width: 332)
@@ -210,6 +212,7 @@ private struct StudioCanvas: View {
     @State private var hoveredSourceIndex: Int?
     @State private var draggingGradientIndex: Int?
     @State private var hoveredGradientIndex: Int?
+    @State private var drawingAdjustmentBrush = false
     @State private var magnificationStart: CGFloat?
     @State private var panOffset: CGSize = .zero
     @State private var panStartOffset: CGSize?
@@ -296,8 +299,10 @@ private struct StudioCanvas: View {
                               ? (pendingHealTarget == nil
                                  ? StudioText.localized("仿製修補：第 1 步，點擊要移除的電線", "Clone heal: Step 1, click the wire to remove")
                                  : StudioText.localized("仿製修補：第 2 步，點擊乾淨天空作為來源", "Clone heal: Step 2, click clean sky as the source"))
-                              : StudioText.localized("漸層工具：紫色虛線是作用方向與範圍，請調整右側滑桿", "Gradient tool: the purple dashed line shows direction and range; adjust the sliders on the right"),
-                              systemImage: localTool == .heal ? "paintbrush.pointed" : "line.diagonal")
+                              : localTool == .gradient
+                              ? StudioText.localized("漸層工具：紫色虛線是作用方向與範圍，請調整右側滑桿", "Gradient tool: the purple dashed line shows direction and range; adjust the sliders on the right")
+                              : StudioText.localized("調整筆刷：在照片上拖曳塗抹，右側可調整羽化與基本參數", "Adjustment brush: paint over the photo; adjust feather and basic values on the right"),
+                              systemImage: localTool == .heal ? "paintbrush.pointed" : (localTool == .gradient ? "line.diagonal" : "paintbrush.fill"))
                             .font(.caption.weight(.medium))
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(.black.opacity(0.72), in: Capsule())
@@ -385,6 +390,15 @@ private struct StudioCanvas: View {
                         return
                     }
                 }
+                if localTool == .brush {
+                    if !drawingAdjustmentBrush {
+                        drawingAdjustmentBrush = true
+                        model.beginAdjustmentBrush(at: point)
+                    } else {
+                        model.appendAdjustmentBrushPoint(point)
+                    }
+                    return
+                }
                 if localTool == .none,
                    !model.healingBrushEnabled,
                    !model.whiteBalancePickerEnabled,
@@ -411,6 +425,11 @@ private struct StudioCanvas: View {
                 }
                 if draggingGradientIndex != nil {
                     draggingGradientIndex = nil
+                    model.finishInteractiveAdjustment()
+                    return
+                }
+                if drawingAdjustmentBrush {
+                    drawingAdjustmentBrush = false
                     model.finishInteractiveAdjustment()
                     return
                 }
@@ -654,6 +673,7 @@ private struct StudioInspector: View {
     @Binding var geometryOpen: Bool
     @Binding var gradientOpen: Bool
     @Binding var healOpen: Bool
+    @Binding var brushOpen: Bool
     @Binding var versionsOpen: Bool
     @Binding var localTool: LocalToolMode
     @Binding var pendingHealTarget: CGPoint?
@@ -766,6 +786,57 @@ private struct StudioInspector: View {
                     .font(.caption2).foregroundStyle(StudioUI.secondary)
             }
         }
+        StudioSection(title: StudioText.localized("調整筆刷", "Adjustment Brush"), systemImage: "paintbrush.fill", isExpanded: $brushOpen) {
+            Text(StudioText.localized("在照片上拖曳建立羽化遮罩，遮罩內的基本調整不會影響整張照片。",
+                                     "Paint on the photo to create a feathered mask. Basic adjustments affect only the painted area."))
+                .font(.caption).foregroundStyle(StudioUI.secondary)
+            HStack {
+                Button {
+                    if model.healingBrushEnabled { model.toggleHealingBrush() }
+                    pendingHealTarget = nil
+                    localTool = .brush
+                } label: {
+                    Label(StudioText.localized("開始筆刷", "Brush On"), systemImage: "paintbrush.fill")
+                }.buttonStyle(.borderedProminent)
+                Button(StudioText.localized("結束筆刷", "Finish Brush")) { localTool = .none }
+                    .disabled(localTool != .brush)
+                Button("−") { model.removeLastAdjustmentBrush() }
+                    .disabled(model.adjustments.adjustmentBrushes.isEmpty)
+                Button(StudioText.localized("清除", "Clear")) { model.clearAdjustmentBrushes() }
+                    .disabled(model.adjustments.adjustmentBrushes.isEmpty)
+            }
+            if !model.adjustments.adjustmentBrushes.isEmpty {
+                let index = model.adjustments.adjustmentBrushes.count - 1
+                Text(StudioText.localized("目前編輯：筆刷 (index + 1)", "Editing brush (index + 1)"))
+                    .font(.caption.weight(.semibold))
+                StudioAdjustmentSlider(title: StudioText.localized("筆刷大小", "Brush Size"), value: scaledBrushBinding(
+                    index, keyPath: \.radiusNorm, scale: 1000, fallback: 0.045
+                ), range: 8...160,
+                onChange: { model.scheduleRender(recordHistory: false) },
+                onEditingChanged: { editing in
+                    if editing { model.beginInteractiveAdjustment() }
+                    else { model.finishInteractiveAdjustment() }
+                })
+                StudioAdjustmentSlider(title: StudioText.localized("羽化", "Feather"), value: scaledBrushBinding(
+                    index, keyPath: \.feather, scale: 100, fallback: 0.65
+                ), range: 0...100,
+                onChange: { model.scheduleRender(recordHistory: false) },
+                onEditingChanged: { editing in
+                    if editing { model.beginInteractiveAdjustment() }
+                    else { model.finishInteractiveAdjustment() }
+                })
+                slider(StudioText.localized("局部曝光", "Local Exposure"), brushBinding(index, keyPath: \.exposure), -2...2)
+                slider(StudioText.localized("局部對比", "Local Contrast"), brushBinding(index, keyPath: \.contrast), StudioAdjustmentRange.contrast)
+                slider(StudioText.localized("局部亮部", "Local Highlights"), brushBinding(index, keyPath: \.highlights), StudioAdjustmentRange.highlights)
+                slider(StudioText.localized("局部暗部", "Local Shadows"), brushBinding(index, keyPath: \.shadows), StudioAdjustmentRange.shadows)
+                slider(StudioText.localized("局部白色", "Local Whites"), brushBinding(index, keyPath: \.whites), StudioAdjustmentRange.whites)
+                slider(StudioText.localized("局部黑色", "Local Blacks"), brushBinding(index, keyPath: \.blacks), StudioAdjustmentRange.blacks)
+                slider(StudioText.localized("局部色溫", "Local Temperature"), brushBinding(index, keyPath: \.temperature, fallback: 5200), 2000...12000)
+                slider(StudioText.localized("局部色調", "Local Tint"), brushBinding(index, keyPath: \.tint), StudioAdjustmentRange.tint)
+                slider(StudioText.localized("局部鮮豔度", "Local Vibrance"), brushBinding(index, keyPath: \.vibrance), StudioAdjustmentRange.vibrance)
+                slider(StudioText.localized("局部飽和度", "Local Saturation"), brushBinding(index, keyPath: \.saturation), StudioAdjustmentRange.saturation)
+            }
+        }
         StudioSection(title: StudioText.versions, systemImage: "square.on.square", isExpanded: $versionsOpen) {
             HStack { Text(StudioText.localized("虛擬副本 \(model.virtualCopyIndex + 1)/\(max(1, model.virtualCopyCount))", "Virtual Copy \(model.virtualCopyIndex + 1)/\(max(1, model.virtualCopyCount))")); Spacer(); Button("←") { model.switchVirtualCopy(by: -1) }; Button(StudioText.localized("新增", "New")) { model.createVirtualCopy() }; Button("→") { model.switchVirtualCopy(by: 1) } }
         }
@@ -778,6 +849,37 @@ private struct StudioInspector: View {
                                    if editing { model.beginInteractiveAdjustment() }
                                    else { model.finishInteractiveAdjustment() }
                                })
+    }
+
+    private func brushBinding(
+        _ index: Int,
+        keyPath: WritableKeyPath<AdjustmentBrush, Double>,
+        fallback: Double = 0
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                guard model.adjustments.adjustmentBrushes.indices.contains(index) else { return fallback }
+                return model.adjustments.adjustmentBrushes[index][keyPath: keyPath]
+            },
+            set: { value in
+                guard model.adjustments.adjustmentBrushes.indices.contains(index) else { return }
+                model.adjustments.adjustmentBrushes[index][keyPath: keyPath] = value
+            }
+        )
+    }
+
+    private func scaledBrushBinding(
+        _ index: Int,
+        keyPath: WritableKeyPath<AdjustmentBrush, Double>,
+        scale: Double,
+        fallback: Double
+    ) -> Binding<Double> {
+        Binding(
+            get: { brushBinding(index, keyPath: keyPath, fallback: fallback).wrappedValue * scale },
+            set: { value in
+                brushBinding(index, keyPath: keyPath, fallback: fallback).wrappedValue = value / scale
+            }
+        )
     }
 
     @ViewBuilder private var presetTab: some View {
@@ -928,6 +1030,20 @@ private struct LocalToolMarkers: View {
                                   isActive: localTool == .gradient,
                                   isHovered: hoveredGradientIndex == index)
                 }
+                ForEach(Array(model.adjustments.adjustmentBrushes.enumerated()), id: \.offset) { index, brush in
+                    Path { path in
+                        guard let first = brush.points.first else { return }
+                        path.move(to: CGPoint(x: first.x * geometry.size.width,
+                                              y: (1 - first.y) * geometry.size.height))
+                        for point in brush.points.dropFirst() {
+                            path.addLine(to: CGPoint(x: point.x * geometry.size.width,
+                                                     y: (1 - point.y) * geometry.size.height))
+                        }
+                    }
+                    .stroke(index == model.adjustments.adjustmentBrushes.count - 1
+                            ? Color.yellow.opacity(0.9) : Color.white.opacity(0.35),
+                            style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                }
                 if localTool == .heal, let pendingHealTarget {
                     let point = CGPoint(x: pendingHealTarget.x * geometry.size.width,
                                         y: (1 - pendingHealTarget.y) * geometry.size.height)
@@ -945,6 +1061,20 @@ private struct LocalToolMarkers: View {
                     Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                         .frame(width: max(24, model.adjustments.healSize * 2) / max(0.001, zoomScale),
                                height: max(24, model.adjustments.healSize * 2) / max(0.001, zoomScale))
+                        .position(logicalPoint)
+                        .shadow(color: .black, radius: 2)
+                }
+                if localTool == .brush, let pointerLocation {
+                    let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    let logicalPoint = CGPoint(
+                        x: (pointerLocation.x - center.x - panOffset.width) / max(0.001, zoomScale) + center.x,
+                        y: (pointerLocation.y - center.y - panOffset.height) / max(0.001, zoomScale) + center.y
+                    )
+                    let radiusNorm = model.adjustments.adjustmentBrushes.last?.radiusNorm ?? 0.045
+                    let diameter = max(16, radiusNorm * max(geometry.size.width, geometry.size.height) * 2)
+                    Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                        .frame(width: diameter / max(0.001, zoomScale),
+                               height: diameter / max(0.001, zoomScale))
                         .position(logicalPoint)
                         .shadow(color: .black, radius: 2)
                 }

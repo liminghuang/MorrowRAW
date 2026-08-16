@@ -774,6 +774,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         var neutral = adjustments
         neutral.resetTonal()
         neutral.gradients.removeAll()
+        neutral.adjustmentBrushes.removeAll()
         neutral.healSpots.removeAll()
         return neutral
     }
@@ -1167,6 +1168,39 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     func removeLastGradient() {
         guard !adjustments.gradients.isEmpty else { return }
         adjustments.gradients.removeLast()
+        scheduleRender()
+    }
+
+    func beginAdjustmentBrush(at point: CGPoint) {
+        let x = min(1, max(0, point.x))
+        let y = min(1, max(0, point.y))
+        beginInteractiveAdjustment()
+        var brush = adjustments.adjustmentBrushes.last ?? AdjustmentBrush()
+        brush.points = [AdjustmentBrushPoint(x: x, y: y)]
+        adjustments.adjustmentBrushes.append(brush)
+        scheduleRender(recordHistory: false)
+    }
+
+    func appendAdjustmentBrushPoint(_ point: CGPoint) {
+        guard !adjustments.adjustmentBrushes.isEmpty else { return }
+        let x = min(1, max(0, point.x))
+        let y = min(1, max(0, point.y))
+        guard let last = adjustments.adjustmentBrushes.indices.last else { return }
+        let previous = adjustments.adjustmentBrushes[last].points.last
+        guard previous?.x != x || previous?.y != y else { return }
+        adjustments.adjustmentBrushes[last].points.append(AdjustmentBrushPoint(x: x, y: y))
+        scheduleRender(recordHistory: false)
+    }
+
+    func removeLastAdjustmentBrush() {
+        guard !adjustments.adjustmentBrushes.isEmpty else { return }
+        adjustments.adjustmentBrushes.removeLast()
+        scheduleRender()
+    }
+
+    func clearAdjustmentBrushes() {
+        guard !adjustments.adjustmentBrushes.isEmpty else { return }
+        adjustments.adjustmentBrushes.removeAll()
         scheduleRender()
     }
 

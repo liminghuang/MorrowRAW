@@ -48,42 +48,7 @@ final class ImageRenderer {
 
     func render(_ image: CIImage, adjustments: ImageAdjustments,
                 quality: RenderQuality = .export) -> CIImage {
-        var output = image
-
-        if adjustments.exposure != 0 {
-            let filter = CIFilter.exposureAdjust()
-            filter.inputImage = output
-            filter.ev = Float(adjustments.exposure)
-            output = filter.outputImage ?? output
-        }
-
-        if adjustments.temperature != 5200 || adjustments.tint != 0 {
-            let filter = CIFilter.temperatureAndTint()
-            filter.inputImage = output
-            filter.neutral = CIVector(x: 5200, y: 0)
-            filter.targetNeutral = CIVector(x: adjustments.temperature,
-                                            y: adjustments.tint)
-            output = filter.outputImage ?? output
-        }
-
-        if adjustments.contrast != 0 {
-            let filter = CIFilter.colorControls()
-            filter.inputImage = output
-            filter.contrast = Float(1 + adjustments.contrast / 100)
-            output = filter.outputImage ?? output
-        }
-
-        if adjustments.saturation != 0 || adjustments.vibrance != 0 {
-            output = perceptualColorAdjust(output, saturation: adjustments.saturation,
-                                           vibrance: adjustments.vibrance) ??
-                fallbackColorAdjust(output, saturation: adjustments.saturation,
-                                    vibrance: adjustments.vibrance)
-        }
-
-        if adjustments.highlights != 0 || adjustments.shadows != 0 ||
-            adjustments.whites != 0 || adjustments.blacks != 0 {
-            output = applyToneCurve(to: output, adjustments: adjustments)
-        }
+        var output = applyBasicAdjustments(to: image, adjustments: adjustments)
 
         if adjustments.noiseReduction > 0 {
             if adjustments.noiseReduction >= 65 {
@@ -111,6 +76,10 @@ final class ImageRenderer {
 
         if !adjustments.gradients.isEmpty {
             output = applyGradients(to: output, gradients: adjustments.gradients)
+        }
+
+        if !adjustments.adjustmentBrushes.isEmpty {
+            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes)
         }
 
         if !adjustments.healSpots.isEmpty {
@@ -206,6 +175,9 @@ final class ImageRenderer {
         if !adjustments.gradients.isEmpty {
             output = applyGradients(to: output, gradients: adjustments.gradients)
         }
+        if !adjustments.adjustmentBrushes.isEmpty {
+            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes)
+        }
         if !adjustments.healSpots.isEmpty {
             output = await applyHealSpotsAsync(to: output, spots: adjustments.healSpots, quality: quality)
         }
@@ -224,6 +196,60 @@ final class ImageRenderer {
             output = filter.outputImage ?? output
         }
         return output
+    }
+
+    private func applyBasicAdjustments(to image: CIImage, adjustments: ImageAdjustments,
+                                       usePerceptualColor: Bool = true) -> CIImage {
+        var output = image
+        if adjustments.exposure != 0 {
+            let filter = CIFilter.exposureAdjust()
+            filter.inputImage = output
+            filter.ev = Float(adjustments.exposure)
+            output = filter.outputImage ?? output
+        }
+        if adjustments.temperature != 5200 || adjustments.tint != 0 {
+            let filter = CIFilter.temperatureAndTint()
+            filter.inputImage = output
+            filter.neutral = CIVector(x: 5200, y: 0)
+            filter.targetNeutral = CIVector(x: adjustments.temperature, y: adjustments.tint)
+            output = filter.outputImage ?? output
+        }
+        if adjustments.contrast != 0 {
+            let filter = CIFilter.colorControls()
+            filter.inputImage = output
+            filter.contrast = Float(1 + adjustments.contrast / 100)
+            output = filter.outputImage ?? output
+        }
+        if adjustments.saturation != 0 || adjustments.vibrance != 0 {
+            output = usePerceptualColor
+                ? (perceptualColorAdjust(output, saturation: adjustments.saturation,
+                                         vibrance: adjustments.vibrance) ??
+                   fallbackColorAdjust(output, saturation: adjustments.saturation,
+                                       vibrance: adjustments.vibrance))
+                : fallbackColorAdjust(output, saturation: adjustments.saturation,
+                                      vibrance: adjustments.vibrance)
+        }
+        if adjustments.highlights != 0 || adjustments.shadows != 0 ||
+            adjustments.whites != 0 || adjustments.blacks != 0 {
+            output = applyToneCurve(to: output, adjustments: adjustments)
+        }
+        return output
+    }
+
+    private func applyLocalBasicAdjustments(to image: CIImage,
+                                            brush: AdjustmentBrush) -> CIImage {
+        var adjustments = ImageAdjustments()
+        adjustments.exposure = brush.exposure
+        adjustments.contrast = brush.contrast
+        adjustments.highlights = brush.highlights
+        adjustments.shadows = brush.shadows
+        adjustments.whites = brush.whites
+        adjustments.blacks = brush.blacks
+        adjustments.temperature = brush.temperature
+        adjustments.tint = brush.tint
+        adjustments.vibrance = brush.vibrance
+        adjustments.saturation = brush.saturation
+        return applyBasicAdjustments(to: image, adjustments: adjustments, usePerceptualColor: false)
     }
 
     private func fastNoiseReduction(_ image: CIImage, strength: Double) -> CIImage {
@@ -611,6 +637,79 @@ final class ImageRenderer {
             output = blend.outputImage?.cropped(to: extent) ?? output
         }
         return output
+    }
+
+    private func applyAdjustmentBrushes(to image: CIImage,
+                                        brushes: [AdjustmentBrush]) -> CIImage {
+        let extent = image.extent
+        let maxDimension = max(extent.width, extent.height)
+        var output = image
+
+        for brush in brushes where !brush.points.isEmpty && hasVisibleLocalAdjustment(brush) {
+            let radius = max(1, brush.radiusNorm * maxDimension)
+            let feather = min(1, max(0, brush.feather))
+            let innerRadius = radius * (1 - feather)
+            var mask: CIImage?
+
+            let points = interpolatedBrushPoints(brush.points, radiusNorm: brush.radiusNorm)
+            for point in points {
+                let center = CGPoint(x: extent.minX + point.x * extent.width,
+                                     y: extent.minY + point.y * extent.height)
+                let radial = CIFilter(name: "CIRadialGradient")
+                radial?.setValue(CIVector(x: center.x, y: center.y), forKey: "inputCenter")
+                radial?.setValue(Float(innerRadius), forKey: "inputRadius0")
+                radial?.setValue(Float(radius), forKey: "inputRadius1")
+                radial?.setValue(CIColor.white, forKey: "inputColor0")
+                radial?.setValue(CIColor.clear, forKey: "inputColor1")
+                guard let radialImage = radial?.outputImage?.cropped(to: extent) else { continue }
+                if let existingMask = mask {
+                    let maximum = CIFilter(name: "CIMaximumCompositing")
+                    maximum?.setValue(radialImage, forKey: kCIInputImageKey)
+                    maximum?.setValue(existingMask, forKey: kCIInputBackgroundImageKey)
+                    mask = maximum?.outputImage?.cropped(to: extent) ?? existingMask
+                } else {
+                    mask = radialImage
+                }
+            }
+            guard let mask else { continue }
+            let adjusted = applyLocalBasicAdjustments(to: output, brush: brush)
+            let blend = CIFilter.blendWithMask()
+            blend.inputImage = adjusted
+            blend.backgroundImage = output
+            blend.maskImage = mask
+            output = blend.outputImage?.cropped(to: extent) ?? output
+        }
+        return output
+    }
+
+    private func hasVisibleLocalAdjustment(_ brush: AdjustmentBrush) -> Bool {
+        brush.exposure != 0 || brush.contrast != 0 ||
+        brush.highlights != 0 || brush.shadows != 0 ||
+        brush.whites != 0 || brush.blacks != 0 ||
+        brush.temperature != 5200 || brush.tint != 0 ||
+        brush.vibrance != 0 || brush.saturation != 0
+    }
+
+    private func interpolatedBrushPoints(_ points: [AdjustmentBrushPoint],
+                                         radiusNorm: Double) -> [AdjustmentBrushPoint] {
+        guard points.count > 1 else { return points }
+        let spacing = max(0.002, radiusNorm * 0.45)
+        var result: [AdjustmentBrushPoint] = [points[0]]
+        for pair in zip(points, points.dropFirst()) {
+            let distance = hypot(pair.1.x - pair.0.x, pair.1.y - pair.0.y)
+            let steps = max(1, Int(ceil(distance / spacing)))
+            if steps > 1 {
+                for step in 1..<steps {
+                    let t = Double(step) / Double(steps)
+                    result.append(AdjustmentBrushPoint(
+                        x: pair.0.x + (pair.1.x - pair.0.x) * t,
+                        y: pair.0.y + (pair.1.y - pair.0.y) * t
+                    ))
+                }
+            }
+            result.append(pair.1)
+        }
+        return result
     }
 
     private func applyGeometry(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {

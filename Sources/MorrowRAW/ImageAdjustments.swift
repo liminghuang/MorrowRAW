@@ -24,6 +24,7 @@ struct ImageAdjustments: Equatable {
     var rotation: Int = 0
     var healSize: Double = 10
     var gradients: [LinearGradient] = []
+    var adjustmentBrushes: [AdjustmentBrush] = []
     var healSpots: [HealSpot] = []
     var cachedExif: ExifData?
 
@@ -32,6 +33,7 @@ struct ImageAdjustments: Equatable {
         let parser = AdjustmentXMLParser()
         try parser.parse(data)
         gradients = parser.gradients
+        adjustmentBrushes = parser.adjustmentBrushes
         healSpots = parser.healSpots
         cachedExif = parser.exif
         exposure = parser.number("Exposure", fallback: exposure)
@@ -99,6 +101,37 @@ struct ImageAdjustments: Equatable {
             }
             values.addChild(gradientList)
         }
+        if !adjustmentBrushes.isEmpty {
+            let brushList = XMLElement(name: "AdjustmentBrushes")
+            for brush in adjustmentBrushes {
+                let node = XMLElement(name: "AdjustmentBrush")
+                let fields: [(String, String)] = [
+                    ("RadiusNorm", brush.radiusNorm.xmlValue),
+                    ("Feather", brush.feather.xmlValue),
+                    ("Exposure", brush.exposure.xmlValue),
+                    ("Contrast", brush.contrast.xmlValue),
+                    ("Highlights", brush.highlights.xmlValue),
+                    ("Shadows", brush.shadows.xmlValue),
+                    ("Whites", brush.whites.xmlValue),
+                    ("Blacks", brush.blacks.xmlValue),
+                    ("Temperature", brush.temperature.xmlValue),
+                    ("Tint", brush.tint.xmlValue),
+                    ("Vibrance", brush.vibrance.xmlValue),
+                    ("Saturation", brush.saturation.xmlValue)
+                ]
+                for (name, value) in fields { node.addChild(XMLElement(name: name, stringValue: value)) }
+                let points = XMLElement(name: "Points")
+                for point in brush.points {
+                    let pointNode = XMLElement(name: "Point")
+                    pointNode.addChild(XMLElement(name: "X", stringValue: point.x.xmlValue))
+                    pointNode.addChild(XMLElement(name: "Y", stringValue: point.y.xmlValue))
+                    points.addChild(pointNode)
+                }
+                node.addChild(points)
+                brushList.addChild(node)
+            }
+            values.addChild(brushList)
+        }
         if !healSpots.isEmpty {
             let spotList = XMLElement(name: "HealSpots")
             for spot in healSpots {
@@ -153,6 +186,27 @@ struct LinearGradient: Equatable {
     var saturation = 0.0
 }
 
+struct AdjustmentBrushPoint: Equatable {
+    var x: Double
+    var y: Double
+}
+
+struct AdjustmentBrush: Equatable {
+    var points: [AdjustmentBrushPoint] = []
+    var radiusNorm = 0.045
+    var feather = 0.65
+    var exposure = 0.0
+    var contrast = 0.0
+    var highlights = 0.0
+    var shadows = 0.0
+    var whites = 0.0
+    var blacks = 0.0
+    var temperature = 5200.0
+    var tint = 0.0
+    var vibrance = 0.0
+    var saturation = 0.0
+}
+
 struct HealSpot: Equatable {
     var targetX = 0.0
     var targetY = 0.0
@@ -193,10 +247,13 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
     var values: [String: Double] = [:]
     var strings: [String: String] = [:]
     var gradients: [LinearGradient] = []
+    var adjustmentBrushes: [AdjustmentBrush] = []
     var healSpots: [HealSpot] = []
     var exif: ExifData?
     private var text = ""
     private var currentGradient: LinearGradient?
+    private var currentAdjustmentBrush: AdjustmentBrush?
+    private var currentBrushPoint: AdjustmentBrushPoint?
     private var currentHealSpot: HealSpot?
     private var currentExif: ExifData?
 
@@ -213,6 +270,8 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
                 attributes attributeDict: [String: String] = [:]) {
         text = ""
         if elementName == "LinearGradient" { currentGradient = LinearGradient() }
+        if elementName == "AdjustmentBrush" { currentAdjustmentBrush = AdjustmentBrush() }
+        if elementName == "Point" { currentBrushPoint = AdjustmentBrushPoint(x: 0, y: 0) }
         if elementName == "HealSpot" { currentHealSpot = HealSpot() }
         if elementName == "Exif" { currentExif = ExifData() }
     }
@@ -224,7 +283,8 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, didEndElement elementName: String,
                 namespaceURI: String?, qualifiedName qName: String?) {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isStructuredField = currentGradient != nil || currentHealSpot != nil || currentExif != nil
+        let isStructuredField = currentGradient != nil || currentAdjustmentBrush != nil ||
+            currentBrushPoint != nil || currentHealSpot != nil || currentExif != nil
         if var gradient = currentGradient, elementName != "LinearGradient", let number = Double(value) {
             switch elementName {
             case "CenterX": gradient.centerX = number
@@ -243,6 +303,44 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
         if elementName == "LinearGradient", let gradient = currentGradient {
             gradients.append(gradient)
             currentGradient = nil
+        }
+        if var point = currentBrushPoint, elementName != "Point", let number = Double(value) {
+            switch elementName {
+            case "X": point.x = number
+            case "Y": point.y = number
+            default: break
+            }
+            currentBrushPoint = point
+        }
+        if let point = currentBrushPoint, elementName == "Point" {
+            currentAdjustmentBrush?.points.append(point)
+            currentBrushPoint = nil
+        }
+        if var brush = currentAdjustmentBrush,
+           currentBrushPoint == nil,
+           elementName != "AdjustmentBrush",
+           elementName != "Point",
+           let number = Double(value) {
+            switch elementName {
+            case "RadiusNorm": brush.radiusNorm = number
+            case "Feather": brush.feather = number
+            case "Exposure": brush.exposure = number
+            case "Contrast": brush.contrast = number
+            case "Highlights": brush.highlights = number
+            case "Shadows": brush.shadows = number
+            case "Whites": brush.whites = number
+            case "Blacks": brush.blacks = number
+            case "Temperature": brush.temperature = number
+            case "Tint": brush.tint = number
+            case "Vibrance": brush.vibrance = number
+            case "Saturation": brush.saturation = number
+            default: break
+            }
+            currentAdjustmentBrush = brush
+        }
+        if elementName == "AdjustmentBrush", let brush = currentAdjustmentBrush {
+            adjustmentBrushes.append(brush)
+            currentAdjustmentBrush = nil
         }
         if var spot = currentHealSpot, elementName != "HealSpot" {
             if let number = Double(value) {
