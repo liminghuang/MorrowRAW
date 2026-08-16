@@ -3,6 +3,14 @@
 這是 Morrow RAW 的原生 macOS SwiftUI RAW 相片編輯器，專為 Apple Silicon
 Mac 與 Apple GPU Metal pipeline 優化。
 
+## App 截圖
+
+![Morrow RAW 主編輯畫面](Assets/Screenshots/morrow-raw-editor.png)
+
+![Morrow RAW Before/After 對照](Assets/Screenshots/morrow-raw-before-after.png)
+
+![Morrow RAW 匯出與照片資訊](Assets/Screenshots/morrow-raw-export.png)
+
 ## 用 Xcode 開啟
 
 1. 用 Xcode 開啟 `Package.swift`。
