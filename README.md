@@ -9,8 +9,6 @@ Mac 與 Apple GPU Metal pipeline 優化。
 
 ![Morrow RAW Before/After 對照](Assets/Screenshots/morrow-raw-before-after.png)
 
-![Morrow RAW 匯出與照片資訊](Assets/Screenshots/morrow-raw-export.png)
-
 ## 用 Xcode 開啟
 
 1. 用 Xcode 開啟 `Package.swift`。
