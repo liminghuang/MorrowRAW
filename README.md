@@ -106,5 +106,3 @@ swift build -c release
 實際相機 RAW 是否能由 Apple RAW 解碼器直接開啟，仍需使用對應相機的樣本檔案驗證；若同資料夾存在 `RAW_TEMP` proxy，macOS 版本會優先使用該 proxy 作為 fallback。
 
 修補點目前以圓形 feather mask 搭配 clone 或局部 blur 近似原 Windows 的修補演算法；拖曳筆刷目前建立連續 inpaint 點。
-
-ARM64/Apple GPU 的最佳化細節請參考 [`ARM64_OPTIMIZATION.md`](ARM64_OPTIMIZATION.md)。
