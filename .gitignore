@@ -1,0 +1,8 @@
+.build/
+.clang-module-cache/
+.swiftpm/
+dist/
+.dmg-staging/
+.DS_Store
+*.xcuserstate
+DerivedData/
