@@ -37,7 +37,11 @@ final class EditorViewModel: ObservableObject {
     @Published var showHiddenPhotos = false
     @Published private(set) var isLoadingFolder = false
     @Published private(set) var folderLoadCount = 0
+    @Published private(set) var folderTotalCount = 0
     @Published private(set) var isLoadingPhoto = false
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportCompletedCount = 0
+    @Published private(set) var exportTotalCount = 0
     @Published private(set) var recentFolders: [String] = []
     @Published var appearance: AppAppearance = AppAppearance(rawValue:
         UserDefaults.standard.string(forKey: "MorrowRAW.appearance") ?? "") ?? .system {
@@ -48,7 +52,7 @@ final class EditorViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(language.rawValue, forKey: "MorrowRAW.language") }
     }
 
-    private let renderer = ImageRenderer()
+    private let renderer = ImageRenderer.shared
     private let exporter = ImageExporter()
     private var source: CIImage?
     private var currentPhotoURL: URL?
@@ -64,6 +68,8 @@ final class EditorViewModel: ObservableObject {
     private var terminationObserver: NSObjectProtocol?
     private var folderScanTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
+    private var batchExportTask: Task<Void, Never>?
+    private var batchExportCancellation: BatchExportCancellationToken?
     private var folderScanID = UUID()
     private var activeLoadID = UUID()
 
@@ -98,6 +104,8 @@ final class EditorViewModel: ObservableObject {
     deinit {
         folderScanTask?.cancel()
         loadTask?.cancel()
+        batchExportCancellation?.cancel()
+        batchExportTask?.cancel()
         if let openURLObserver { NotificationCenter.default.removeObserver(openURLObserver) }
         if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
     }
@@ -110,9 +118,7 @@ final class EditorViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        photos = []
-        selectedIndex = 0
-        open(url: url)
+        openDropped(url: url)
     }
 
     func openFolder() {
@@ -139,13 +145,32 @@ final class EditorViewModel: ObservableObject {
     }
 
     func open(url: URL) {
-        open(urls: [url])
+        // This single-URL API is also used by compatibility tests and internal
+        // adjustment workflows; retain its synchronous contract. UI entry
+        // points use `openDropped`/`open(urls:)`, which decode in background.
+        currentFolderURL = nil
+        photos = []
+        selectedIndex = 0
+        selectedPhotoIndices = []
+        load(url: url, copyIndex: 0)
     }
 
     func open(urls: [URL]) {
+        open(urls: urls, synchronously: false)
+    }
+
+    /// Synchronous multi-photo loading is reserved for deterministic internal
+    /// workflows that immediately inspect or write the first photo's state.
+    /// Finder, drag-and-drop, and application launch use the async default.
+    func openSynchronously(urls: [URL]) {
+        open(urls: urls, synchronously: true)
+    }
+
+    private func open(urls: [URL], synchronously: Bool) {
         guard !urls.isEmpty else { return }
         if urls.count == 1 {
-            openDropped(url: urls[0])
+            if synchronously { open(url: urls[0]) }
+            else { openDropped(url: urls[0]) }
             return
         }
         let supported = urls.filter {
@@ -159,7 +184,11 @@ final class EditorViewModel: ObservableObject {
         currentFolderURL = nil
         selectedIndex = 0
         selectedPhotoIndices = [0]
-        load(url: supported[0], copyIndex: 0)
+        if synchronously {
+            load(url: supported[0], copyIndex: 0)
+        } else {
+            loadInBackground(url: supported[0], copyIndex: 0)
+        }
     }
 
     func openDropped(url: URL) {
@@ -172,7 +201,7 @@ final class EditorViewModel: ObservableObject {
             photos = []
             selectedIndex = 0
             selectedPhotoIndices = []
-            load(url: url, copyIndex: 0)
+            loadInBackground(url: url, copyIndex: 0)
         }
     }
 
@@ -180,7 +209,7 @@ final class EditorViewModel: ObservableObject {
         guard photos.indices.contains(index) else { return }
         selectedIndex = index
         selectedPhotoIndices = [index]
-        load(url: photos[index], copyIndex: 0)
+        loadInBackground(url: photos[index], copyIndex: 0)
     }
 
     func setPhotoSelection(at index: Int, selected: Bool) {
@@ -206,7 +235,7 @@ final class EditorViewModel: ObservableObject {
             photos = PhotoLibrary.scan(folder: folder, includeHidden: showHiddenPhotos, rawOnly: true)
             if let next = photos.first {
                 selectedIndex = 0
-                load(url: next, copyIndex: 0)
+                loadInBackground(url: next, copyIndex: 0)
             } else {
                 selectedIndex = 0
                 source = nil
@@ -236,7 +265,7 @@ final class EditorViewModel: ObservableObject {
             return
         }
         selectedIndex = min(selectedIndex, scanned.count - 1)
-        load(url: scanned[selectedIndex], copyIndex: 0)
+        loadInBackground(url: scanned[selectedIndex], copyIndex: 0)
     }
 
     private func load(url: URL, copyIndex: Int = 0) {
@@ -293,6 +322,7 @@ final class EditorViewModel: ObservableObject {
 
     private func applyLoadedPhoto(url: URL, copyIndex: Int, image: CIImage, exif: ExifData?) {
         isLoadingPhoto = false
+        errorMessage = nil
         source = image
         currentPhotoURL = url
         virtualCopyIndex = copyIndex
@@ -326,24 +356,33 @@ final class EditorViewModel: ObservableObject {
         folderScanID = scanID
         isLoadingFolder = true
         folderLoadCount = 0
+        folderTotalCount = 0
         photos = []
         selectedIndex = 0
         selectedPhotoIndices = []
         let includeHidden = showHiddenPhotos
         let model = self
         folderScanTask = Task.detached(priority: .userInitiated) {
-            let scanned = PhotoLibrary.scanIncrementally(folder: folder, includeHidden: includeHidden, rawOnly: true) { url in
+            let scanned = PhotoLibrary.scanIncrementally(folder: folder, includeHidden: includeHidden, rawOnly: true,
+                                                         onTotal: { total in
                 Task { @MainActor in
-                    guard model.folderScanID == scanID else { return }
-                    model.photos.append(url)
+                    guard model.folderScanID == scanID, model.isLoadingFolder else { return }
+                    model.folderTotalCount = total
+                }
+            }, shouldCancel: {
+                Task.isCancelled
+            }, onBatch: { batch in
+                Task { @MainActor in
+                    guard model.folderScanID == scanID, model.isLoadingFolder else { return }
+                    model.photos.append(contentsOf: batch)
                     model.folderLoadCount = model.photos.count
-                    if model.photos.count == 1 {
+                    if model.photos.count == batch.count, let first = batch.first {
                         model.selectedIndex = 0
                         model.selectedPhotoIndices = [0]
-                        model.loadInBackground(url: url, copyIndex: 0)
+                        model.loadInBackground(url: first, copyIndex: 0)
                     }
                 }
-            }
+            })
             await MainActor.run {
                 guard model.folderScanID == scanID else { return }
                 model.folderScanTask = nil
@@ -352,7 +391,7 @@ final class EditorViewModel: ObservableObject {
                 if let first = scanned.first {
                     model.selectedIndex = 0
                     model.selectedPhotoIndices = [0]
-                    if model.currentPhotoURL != first {
+                    if model.currentPhotoURL != first && !model.isLoadingPhoto {
                         model.loadInBackground(url: first, copyIndex: 0)
                     }
                 }
@@ -366,11 +405,13 @@ final class EditorViewModel: ObservableObject {
     func cancelFolderLoading() {
         folderScanID = UUID()
         folderScanTask?.cancel()
+        loadTask?.cancel()
         folderScanTask = nil
         isLoadingFolder = false
         photos = []
         selectedPhotoIndices = []
         isLoadingPhoto = false
+        folderTotalCount = 0
     }
 
     private func prepareForFolderChange(to folder: URL) {
@@ -406,7 +447,7 @@ final class EditorViewModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(70))
             guard !Task.isCancelled else { return }
             let interactivePair = await Task.detached(priority: .userInitiated) {
-                let renderer = ImageRenderer()
+                let renderer = ImageRenderer.shared
                 let edited = await renderer.makePreviewAsync(
                     source, adjustments: compare ? editedAdjustments : current, quality: .interactive
                 )
@@ -419,15 +460,19 @@ final class EditorViewModel: ObservableObject {
             guard !Task.isCancelled, let interactivePreview = interactivePair.0 else { return }
             self.preview = NSImage(cgImage: interactivePreview, size: .zero)
             self.beforeAfterOriginalPreview = interactivePair.1.map { NSImage(cgImage: $0, size: .zero) }
-            self.histogram = HistogramCalculator.bins(for: interactivePreview)
-            self.rgbHistogram = HistogramCalculator.rgbBins(for: interactivePreview)
+            let interactiveHistogram = await Task.detached(priority: .utility) {
+                HistogramCalculator.snapshot(for: interactivePreview)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.histogram = interactiveHistogram.luminance
+            self.rgbHistogram = interactiveHistogram.rgb
 
             // Let the user see the responsive low-quality result first, then
             // refine only if no newer adjustment cancelled this render task.
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
             let finalPair = await Task.detached(priority: .userInitiated) {
-                let renderer = ImageRenderer()
+                let renderer = ImageRenderer.shared
                 let edited = await renderer.makePreviewAsync(
                     source, adjustments: compare ? editedAdjustments : current, quality: .finalPreview
                 )
@@ -440,8 +485,12 @@ final class EditorViewModel: ObservableObject {
             guard !Task.isCancelled, let finalPreview = finalPair.0 else { return }
             self.preview = NSImage(cgImage: finalPreview, size: .zero)
             self.beforeAfterOriginalPreview = finalPair.1.map { NSImage(cgImage: $0, size: .zero) }
-            self.histogram = HistogramCalculator.bins(for: finalPreview)
-            self.rgbHistogram = HistogramCalculator.rgbBins(for: finalPreview)
+            let finalHistogram = await Task.detached(priority: .utility) {
+                HistogramCalculator.snapshot(for: finalPreview)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.histogram = finalHistogram.luminance
+            self.rgbHistogram = finalHistogram.rgb
         }
 
         saveTask?.cancel()
@@ -505,6 +554,7 @@ final class EditorViewModel: ObservableObject {
     }
 
     func exportAll(format: ImageExportFormat) {
+        guard !isExporting else { return }
         let exportURLs = PhotoLibrary.exportable(photos, from: currentFolderURL)
         guard !exportURLs.isEmpty else {
             errorMessage = "沒有可匯出的照片"
@@ -520,20 +570,56 @@ final class EditorViewModel: ObservableObject {
         panel.prompt = "選擇匯出資料夾"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
 
-        let result = try? ImageBatchExporter().export(urls: exportURLs, to: folder, format: format,
-                                                       quality: exportQuality,
-                                                       maxLongEdge: exportMaxLongEdge > 0 ? exportMaxLongEdge : nil,
-                                                       dpi: exportDPI, preserveMetadata: preserveMetadata,
-                                                       naming: batchExportNaming,
-                                                       conflict: batchConflictMode,
-                                                       watermark: watermark)
-        guard let result else {
-            errorMessage = "批次匯出失敗"
-            return
+        let cancellation = BatchExportCancellationToken()
+        batchExportCancellation = cancellation
+        isExporting = true
+        exportCompletedCount = 0
+        exportTotalCount = exportURLs.count
+        let quality = exportQuality
+        let maxLongEdge = exportMaxLongEdge > 0 ? exportMaxLongEdge : nil
+        let dpi = exportDPI
+        let preserveMetadata = preserveMetadata
+        let naming = batchExportNaming
+        let conflict = batchConflictMode
+        let watermark = watermark
+
+        batchExportTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                try? ImageBatchExporter().export(
+                    urls: exportURLs, to: folder, format: format,
+                    quality: quality, maxLongEdge: maxLongEdge, dpi: dpi,
+                    preserveMetadata: preserveMetadata, naming: naming,
+                    conflict: conflict, watermark: watermark,
+                    onProgress: { completed, total in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.isExporting else { return }
+                            self.exportCompletedCount = completed
+                            self.exportTotalCount = total
+                        }
+                    },
+                    shouldCancel: { cancellation.isCancelled }
+                )
+            }.value
+
+            guard let self else { return }
+            self.isExporting = false
+            self.batchExportCancellation = nil
+            self.batchExportTask = nil
+            guard let result else {
+                self.errorMessage = "批次匯出失敗"
+                return
+            }
+            if result.cancelled {
+                self.errorMessage = "已取消匯出（已完成 \(result.writtenURLs.count) 張）"
+            } else if !result.failures.isEmpty {
+                self.errorMessage = "已匯出 \(result.writtenURLs.count) 張，\(result.failures.count) 張失敗"
+            }
         }
-        if !result.failures.isEmpty {
-            errorMessage = "已匯出 \(result.writtenURLs.count) 張，\(result.failures.count) 張失敗"
-        }
+    }
+
+    func cancelBatchExport() {
+        guard isExporting else { return }
+        batchExportCancellation?.cancel()
     }
 
     func rotateLeft() {
@@ -1330,7 +1416,7 @@ struct ContentView: View {
                 Divider()
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
-                        ForEach(Array(model.photos.enumerated()), id: \.offset) { index, url in
+                        ForEach(Array(model.photos.enumerated()), id: \.element) { index, url in
                             VStack(spacing: 2) {
                                 Button {
                                     model.selectPhoto(at: index)
@@ -1415,6 +1501,7 @@ struct ContentView: View {
 private struct ThumbnailView: View {
     let url: URL
     @State private var image: NSImage?
+    @State private var isLoading = false
 
     var body: some View {
         Group {
@@ -1431,15 +1518,38 @@ private struct ThumbnailView: View {
         .frame(width: 110, height: 70)
         .clipped()
         .background(Color.secondary.opacity(0.12))
+        .overlay {
+            if isLoading { ProgressView().controlSize(.small) }
+        }
         .task(id: url) {
-            image = PhotoThumbnailLoader().load(url: url)
+            isLoading = true
+            let cgImage: CGImage? = await withTaskCancellationHandler(operation: {
+                await ThumbnailDecodeGate.shared.acquire()
+                guard !Task.isCancelled else {
+                    await ThumbnailDecodeGate.shared.release()
+                    return nil
+                }
+                let decodeTask = Task.detached(priority: .utility) {
+                    PhotoThumbnailLoader.shared.loadCGImage(url: url)
+                }
+                let result = await decodeTask.value
+                await ThumbnailDecodeGate.shared.release()
+                return result
+            }, onCancel: {
+                Task { @MainActor in isLoading = false }
+            })
+            guard !Task.isCancelled else { return }
+            image = cgImage.map { NSImage(cgImage: $0, size: .zero) }
+            isLoading = false
         }
     }
 }
 
-struct PhotoThumbnailLoader {
+final class PhotoThumbnailLoader {
+    static let shared = PhotoThumbnailLoader()
+
     private let decoder: PhotoDecoder = ApplePhotoDecoder()
-    private let renderer = ImageRenderer()
+    private let renderer = ImageRenderer.shared
 
     func load(url: URL) -> NSImage? {
         guard let cgImage = loadCGImage(url: url) else { return nil }
@@ -1450,7 +1560,7 @@ struct PhotoThumbnailLoader {
         if let cached = PhotoThumbnailCache.shared.image(for: url) {
             return cached
         }
-        guard let source = try? decoder.decode(url: url) else { return nil }
+        guard let source = try? decoder.decodePreview(url: url, maxDimension: 220) else { return nil }
         guard let image = renderer.makePreview(source, adjustments: ImageAdjustments(), maxDimension: 220) else { return nil }
         PhotoThumbnailCache.shared.store(image, for: url)
         return image

@@ -15,6 +15,13 @@ enum PhotoDecoderError: LocalizedError, Equatable {
 
 protocol PhotoDecoder {
     func decode(url: URL) throws -> CIImage
+    func decodePreview(url: URL, maxDimension: CGFloat) throws -> CIImage
+}
+
+extension PhotoDecoder {
+    func decodePreview(url: URL, maxDimension: CGFloat) throws -> CIImage {
+        try decode(url: url)
+    }
 }
 
 final class ApplePhotoDecoder: PhotoDecoder {
@@ -29,6 +36,8 @@ final class ApplePhotoDecoder: PhotoDecoder {
     ]
 
     func decode(url: URL) throws -> CIImage {
+        let signpostID = MorrowPerformanceLog.begin("RAW decode")
+        defer { MorrowPerformanceLog.end("RAW decode", id: signpostID) }
         guard Self.isSupported(url) else { throw PhotoDecoderError.unsupportedFormat }
         let cacheKey = PhotoFileFingerprint.key(for: url) as NSString
         if let cached = Self.decodedCache.object(forKey: cacheKey) {
@@ -54,6 +63,25 @@ final class ApplePhotoDecoder: PhotoDecoder {
         guard let decoded else { throw PhotoDecoderError.cannotDecode(url) }
         Self.decodedCache.setObject(decoded, forKey: cacheKey)
         return decoded
+    }
+
+    func decodePreview(url: URL, maxDimension: CGFloat) throws -> CIImage {
+        guard Self.isSupported(url) else { throw PhotoDecoderError.unsupportedFormat }
+        guard Self.isRaw(url), maxDimension > 0,
+              let rawFilter = CIFilter(imageURL: url) as? CIRAWFilter else {
+            return try decode(url: url)
+        }
+
+        let nativeSize = rawFilter.nativeSize
+        let longestEdge = max(nativeSize.width, nativeSize.height)
+        if longestEdge > maxDimension {
+            rawFilter.scaleFactor = Float(maxDimension / longestEdge)
+        }
+        rawFilter.isDraftModeEnabled = true
+        guard let output = rawFilter.outputImage, !output.extent.isEmpty else {
+            return try decode(url: url)
+        }
+        return output
     }
 
     private static func isRaw(_ url: URL) -> Bool {

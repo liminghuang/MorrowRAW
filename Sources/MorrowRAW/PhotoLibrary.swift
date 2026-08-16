@@ -27,10 +27,13 @@ struct PhotoLibrary {
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
-    /// Scans on the caller's queue and reports each supported file as soon as it is found.
-    /// The caller can use this to keep the UI responsive while a large folder is discovered.
+    /// Scans on the caller's queue and reports supported files in small batches.
+    /// Batching keeps a large folder from scheduling one UI update per file.
     static func scanIncrementally(folder: URL, includeHidden: Bool = false, rawOnly: Bool = false,
-                                  onPhoto: @Sendable (URL) -> Void) -> [URL] {
+                                  batchSize: Int = 32,
+                                  onTotal: @Sendable (Int) -> Void = { _ in },
+                                  shouldCancel: @Sendable () -> Bool = { false },
+                                  onBatch: @Sendable ([URL]) -> Void) -> [URL] {
         let state = includeHidden ? PhotoLibraryState() : PhotoLibraryState.load(folder: folder)
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: folder,
@@ -38,17 +41,29 @@ struct PhotoLibrary {
             options: [.skipsHiddenFiles]
         ) else { return [] }
 
-        var found: [URL] = []
-        for url in urls {
-            let extensions = rawOnly ? rawExtensions : supportedExtensions
+        let extensions = rawOnly ? rawExtensions : supportedExtensions
+        let candidates = urls.filter { url in
             guard extensions.contains(url.pathExtension.lowercased()),
                   let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-                  values.isRegularFile == true,
-                  includeHidden || !state.contains(url) else { continue }
+                  values.isRegularFile == true else { return false }
+            return includeHidden || !state.contains(url)
+        }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        onTotal(candidates.count)
+
+        var found: [URL] = []
+        var batch: [URL] = []
+        let safeBatchSize = max(1, batchSize)
+        for url in candidates {
+            if shouldCancel() { break }
             found.append(url)
-            onPhoto(url)
+            batch.append(url)
+            if batch.count >= safeBatchSize {
+                onBatch(batch)
+                batch.removeAll(keepingCapacity: true)
+            }
         }
-        return found.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        if !batch.isEmpty { onBatch(batch) }
+        return found
     }
 
     /// Hidden photos remain viewable in "show hidden" mode but are never exportable.

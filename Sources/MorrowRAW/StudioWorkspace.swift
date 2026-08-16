@@ -45,16 +45,43 @@ struct StudioWorkspace: View {
         .background(StudioUI.background)
         .foregroundStyle(StudioUI.primary)
         .environment(\.locale, model.language.locale)
-        .alert("無法開啟照片", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("好") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "未知錯誤") }
+        .overlay(alignment: .top) {
+            if model.isExporting {
+                BatchExportProgressView(model: model)
+                    .padding(.top, 58)
+            }
+        }
+        .alert(StudioText.photoOpenError, isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+            Button(StudioText.ok) { model.errorMessage = nil }
+        } message: { Text(model.errorMessage ?? StudioText.unknownError) }
         .sheet(isPresented: $model.showingPresetNameSheet) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("新增自訂預設").font(.headline)
-                TextField("預設名稱", text: $model.presetNameDraft).textFieldStyle(.roundedBorder)
-                HStack { Spacer(); Button("取消") { model.showingPresetNameSheet = false }; Button("儲存") { model.saveNewCustomPreset() }.keyboardShortcut(.defaultAction) }
+                Text(StudioText.addCustomPreset).font(.headline)
+                TextField(StudioText.presetName, text: $model.presetNameDraft).textFieldStyle(.roundedBorder)
+                HStack { Spacer(); Button(StudioText.cancel) { model.showingPresetNameSheet = false }; Button(StudioText.save) { model.saveNewCustomPreset() }.keyboardShortcut(.defaultAction) }
             }.padding(22).frame(width: 360)
         }
+    }
+}
+
+private struct BatchExportProgressView: View {
+    @ObservedObject var model: EditorViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView(value: Double(model.exportCompletedCount),
+                         total: Double(max(1, model.exportTotalCount)))
+                .frame(width: 150)
+            Text(StudioText.exporting(model.exportCompletedCount, model.exportTotalCount))
+                .font(.caption.monospacedDigit())
+            Button(StudioText.cancel) { model.cancelBatchExport() }
+                .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.78), in: Capsule())
+        .foregroundStyle(.white)
+        .shadow(radius: 5)
     }
 }
 
@@ -69,11 +96,17 @@ private struct StudioToolbar: View {
             Button(StudioText.openPhoto, action: model.openPhoto).keyboardShortcut("o", modifiers: [.command])
             Spacer()
             Text(model.sourceName).font(.callout).foregroundStyle(StudioUI.secondary).lineLimit(1)
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!model.canUndo).help(StudioText.undo)
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!model.canRedo).help(StudioText.redo)
+            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                .disabled(!model.canUndo)
+                .help(StudioText.undo)
+                .keyboardShortcut("z", modifiers: [.command])
+            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                .disabled(!model.canRedo)
+                .help(StudioText.redo)
+                .keyboardShortcut("z", modifiers: [.command, .shift])
             Button(StudioText.reset) { model.resetAllAdjustments() }
             Menu { exportMenu } label: { Label(StudioText.export, systemImage: "square.and.arrow.up") }
-                .disabled(model.preview == nil)
+            .disabled(model.preview == nil || model.isExporting)
         }
         .buttonStyle(.bordered)
         .padding(.horizontal, 14).frame(height: 52)
@@ -87,7 +120,7 @@ private struct StudioToolbar: View {
         Button("BMP…") { model.export(format: .bmp) }
         if model.photos.count > 1 {
             Divider()
-            Menu("全部照片…") {
+            Menu(StudioText.allPhotos) {
                 Button("JPEG") { model.exportAll(format: .jpeg) }
                 Button("PNG") { model.exportAll(format: .png) }
                 Button("TIFF") { model.exportAll(format: .tiff) }
@@ -102,8 +135,8 @@ private struct StudioLibrary: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(StudioText.library).font(.title3.weight(.semibold)).padding(16)
             VStack(alignment: .leading, spacing: 5) {
-                Button { model.openFolder() } label: { Label("資料夾", systemImage: "folder") }
-                Button { model.openPhoto() } label: { Label("單張照片", systemImage: "photo") }
+                Button { model.openFolder() } label: { Label(StudioText.folder, systemImage: "folder") }
+                Button { model.openPhoto() } label: { Label(StudioText.singlePhoto, systemImage: "photo") }
                 Menu { 
                     if model.recentFolders.isEmpty { Text(StudioText.noHistory) }
                     else { ForEach(model.recentFolders, id: \.self) { path in Button(path) { model.openRecentFolder(path) } } }
@@ -118,7 +151,7 @@ private struct StudioLibrary: View {
             Spacer()
             if let exif = model.adjustments.cachedExif {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("照片資訊").font(.headline)
+                    Text(StudioText.photoInfo).font(.headline)
                     PhotoMetadataSummary(exif: exif)
                 }.font(.caption).foregroundStyle(StudioUI.secondary).padding(16)
             }
@@ -149,13 +182,13 @@ private struct StudioCanvas: View {
                     .padding(28)
             } else if let preview = model.preview {
                 Image(nsImage: preview).resizable().aspectRatio(contentMode: .fit).scaleEffect(model.zoomScale).padding(28)
-            } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text("開啟照片開始編輯").font(.title3) }.foregroundStyle(StudioUI.secondary) }
+            } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
             VStack {
                 if model.isLoadingFolder {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("正在讀取照片… 已找到 \(model.folderLoadCount) 張")
-                        Button("取消") { model.cancelFolderLoading() }
+                        Text(StudioText.loadingPhotos(model.folderLoadCount, model.folderTotalCount))
+                        Button(StudioText.cancel) { model.cancelFolderLoading() }
                     }
                     .font(.caption)
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -165,7 +198,7 @@ private struct StudioCanvas: View {
                 if model.isLoadingPhoto {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("正在解碼 RAW：\(model.sourceName)")
+                        Text(StudioText.decoding(model.sourceName))
                     }
                     .font(.caption)
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -283,11 +316,11 @@ private struct StudioCanvas: View {
         }}
         .overlay(alignment: .bottom) {
             HStack(spacing: 8) {
-                Button("−") { model.zoomOut() }
+                Button("−") { model.zoomOut() }.help(StudioText.zoomOut)
                 Button(StudioText.fit) { model.resetZoom() }
                 Text("\(Int(model.zoomScale * 100))%")
                     .monospacedDigit().frame(width: 48)
-                Button("+") { model.zoomIn() }
+                Button("+") { model.zoomIn() }.help(StudioText.zoomIn)
                 Button(model.showOriginal ? StudioText.edited : StudioText.original) {
                     model.toggleShowOriginal()
                 }
@@ -437,15 +470,15 @@ private struct StudioInspector: View {
 
     @ViewBuilder private var adjustmentTab: some View {
         StudioSection(title: StudioText.basic, systemImage: "slider.horizontal.3", isExpanded: $basicOpen) {
-            slider("曝光", $model.adjustments.exposure, -5...5); slider("對比", $model.adjustments.contrast, -100...100); slider("亮部", $model.adjustments.highlights, -100...100); slider("暗部", $model.adjustments.shadows, -100...100); slider("白色", $model.adjustments.whites, -100...100); slider("黑色", $model.adjustments.blacks, -100...100)
+            slider(StudioText.localized("曝光", "Exposure"), $model.adjustments.exposure, -5...5); slider(StudioText.localized("對比", "Contrast"), $model.adjustments.contrast, -100...100); slider(StudioText.localized("亮部", "Highlights"), $model.adjustments.highlights, -100...100); slider(StudioText.localized("暗部", "Shadows"), $model.adjustments.shadows, -100...100); slider(StudioText.localized("白色", "Whites"), $model.adjustments.whites, -100...100); slider(StudioText.localized("黑色", "Blacks"), $model.adjustments.blacks, -100...100)
         }
         StudioSection(title: StudioText.color, systemImage: "paintpalette", isExpanded: $colorOpen) {
-            slider("色溫", $model.adjustments.temperature, 2000...12000); slider("色調", $model.adjustments.tint, -100...100)
-            Button(model.whiteBalancePickerEnabled ? "請在影像上取樣…" : "白平衡滴管") { model.toggleWhiteBalancePicker() }
-            slider("鮮豔度", $model.adjustments.vibrance, -100...100); slider("飽和度", $model.adjustments.saturation, -100...100)
+            slider(StudioText.localized("色溫", "Temperature"), $model.adjustments.temperature, 2000...12000); slider(StudioText.localized("色調", "Tint"), $model.adjustments.tint, -100...100)
+            Button(model.whiteBalancePickerEnabled ? StudioText.localized("請在影像上取樣…", "Sample from image…") : StudioText.localized("白平衡滴管", "White Balance Picker")) { model.toggleWhiteBalancePicker() }
+            slider(StudioText.localized("鮮豔度", "Vibrance"), $model.adjustments.vibrance, -100...100); slider(StudioText.localized("飽和度", "Saturation"), $model.adjustments.saturation, -100...100)
         }
         StudioSection(title: StudioText.detail, systemImage: "sparkles", isExpanded: $detailOpen) {
-            slider("銳利度", $model.adjustments.sharpening, -100...100); slider("降噪", $model.adjustments.noiseReduction, 0...100); slider("暗角", $model.adjustments.vignette, -100...100); slider("鏡頭變形", $model.adjustments.distortion, -100...100)
+            slider(StudioText.localized("銳利度", "Sharpening"), $model.adjustments.sharpening, -100...100); slider(StudioText.localized("降噪", "Noise Reduction"), $model.adjustments.noiseReduction, 0...100); slider(StudioText.localized("暗角", "Vignette"), $model.adjustments.vignette, -100...100); slider(StudioText.localized("鏡頭變形", "Lens Distortion"), $model.adjustments.distortion, -100...100)
         }
         StudioSection(title: StudioText.geometry, systemImage: "crop", isExpanded: $geometryOpen) {
             Picker("比例", selection: $model.adjustments.cropAspectRatio) { Text("原始").tag("Original"); Text("3:2").tag("3:2"); Text("4:3").tag("4:3"); Text("16:9").tag("16:9"); Text("1:1").tag("1:1") }.onChange(of: model.adjustments.cropAspectRatio) { _ in model.scheduleRender() }
@@ -727,12 +760,12 @@ private struct StudioFilmstrip: View {
     @ObservedObject var model: EditorViewModel
     var body: some View {
         HStack(spacing: 10) {
-            VStack(spacing: 5) { Text("膠卷").font(.caption).foregroundStyle(StudioUI.secondary); Text("\(model.photos.count) 張").font(.caption2) }.frame(width: 60)
-            ScrollView(.horizontal) { LazyHStack(spacing: 8) { ForEach(Array(model.photos.enumerated()), id: \.offset) { index, url in
-                VStack(spacing: 3) { Button { model.selectPhoto(at: index) } label: { StudioThumbnail(url: url, size: CGSize(width: 132, height: 80)) }.buttonStyle(.plain); Text(url.lastPathComponent).font(.caption2).lineLimit(1).frame(width: 132); Toggle("選取", isOn: Binding(get: { model.selectedPhotoIndices.contains(index) }, set: { model.setPhotoSelection(at: index, selected: $0) })).toggleStyle(.checkbox).font(.caption2) }
+            VStack(spacing: 5) { Text(StudioText.filmstrip).font(.caption).foregroundStyle(StudioUI.secondary); Text(StudioText.photoCount(model.photos.count)).font(.caption2) }.frame(width: 60)
+            ScrollView(.horizontal) { LazyHStack(spacing: 8) { ForEach(Array(model.photos.enumerated()), id: \.element) { index, url in
+                VStack(spacing: 3) { Button { model.selectPhoto(at: index) } label: { StudioThumbnail(url: url, size: CGSize(width: 132, height: 80)) }.buttonStyle(.plain); Text(url.lastPathComponent).font(.caption2).lineLimit(1).frame(width: 132); Toggle(StudioText.selected, isOn: Binding(get: { model.selectedPhotoIndices.contains(index) }, set: { model.setPhotoSelection(at: index, selected: $0) })).toggleStyle(.checkbox).font(.caption2) }
                     .padding(5).background(index == model.selectedIndex ? StudioUI.accent.opacity(0.28) : StudioUI.raised).clipShape(RoundedRectangle(cornerRadius: 5))
             } }.padding(.vertical, 8) }
-            if model.photos.count > 1 { Menu("批次") { Button("複製調整至已選取照片") { model.copyCurrentAdjustmentsToSelected() }; Button("複製調整至全部照片") { model.copyCurrentAdjustmentsToAll() }; Divider(); ForEach(BuiltInPreset.allCases) { p in Button("套用 \(p.rawValue) 至全部") { model.applyPresetToAll(p) } } } }
+            if model.photos.count > 1 { Menu(StudioText.batch) { Button(StudioText.copy + "（" + StudioText.selected + "）") { model.copyCurrentAdjustmentsToSelected() }; Button(StudioText.copy + "（" + StudioText.allPhotos.replacingOccurrences(of: "…", with: "") + "）") { model.copyCurrentAdjustmentsToAll() }; Divider(); ForEach(BuiltInPreset.allCases) { p in Button("\(p.rawValue) → " + StudioText.allPhotos.replacingOccurrences(of: "…", with: "")) { model.applyPresetToAll(p) } } } }
         }.padding(.horizontal, 12).background(StudioUI.panel)
     }
 }

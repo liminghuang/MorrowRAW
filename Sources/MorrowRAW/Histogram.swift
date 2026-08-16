@@ -3,7 +3,9 @@ import Accelerate
 import SwiftUI
 
 enum HistogramCalculator {
-    static func bins(for image: CGImage, count: Int = 64) -> [CGFloat] {
+    static func snapshot(for image: CGImage, count: Int = 64) -> HistogramSnapshot {
+        let signpostID = MorrowPerformanceLog.begin("Histogram")
+        defer { MorrowPerformanceLog.end("Histogram", id: signpostID) }
         guard count > 1,
               let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(data: nil, width: image.width, height: image.height,
@@ -11,51 +13,38 @@ enum HistogramCalculator {
                                       space: colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
               let data = context.data else {
-            return []
+            return HistogramSnapshot(luminance: [], rgb: .empty)
         }
         context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         let bytes = data.assumingMemoryBound(to: UInt8.self)
-        var values = [CGFloat](repeating: 0, count: count)
+        var luminance = [CGFloat](repeating: 0, count: count)
+        var red = luminance
+        var green = luminance
+        var blue = luminance
         let pixelCount = image.width * image.height
-        guard pixelCount > 0 else { return values }
         for index in 0..<pixelCount {
             let offset = index * 4
-            let red = CGFloat(bytes[offset]) / 255
-            let green = CGFloat(bytes[offset + 1]) / 255
-            let blue = CGFloat(bytes[offset + 2]) / 255
-            let luminance = min(1, max(0, 0.2126 * red + 0.7152 * green + 0.0722 * blue))
-            let bin = min(count - 1, Int(luminance * CGFloat(count)))
-            values[bin] += 1
+            let redValue = CGFloat(bytes[offset]) / 255
+            let greenValue = CGFloat(bytes[offset + 1]) / 255
+            let blueValue = CGFloat(bytes[offset + 2]) / 255
+            let luminanceValue = min(1, max(0, 0.2126 * redValue + 0.7152 * greenValue + 0.0722 * blueValue))
+            luminance[min(count - 1, Int(luminanceValue * CGFloat(count)))] += 1
+            red[min(count - 1, Int(redValue * CGFloat(count)))] += 1
+            green[min(count - 1, Int(greenValue * CGFloat(count)))] += 1
+            blue[min(count - 1, Int(blueValue * CGFloat(count)))] += 1
         }
-        let peak = values.max() ?? 0
-        guard peak > 0 else { return values }
-        return values.map { $0 / peak }
+        return HistogramSnapshot(
+            luminance: normalize(luminance),
+            rgb: RGBHistogram(red: normalize(red), green: normalize(green), blue: normalize(blue))
+        )
+    }
+
+    static func bins(for image: CGImage, count: Int = 64) -> [CGFloat] {
+        snapshot(for: image, count: count).luminance
     }
 
     static func rgbBins(for image: CGImage, count: Int = 64) -> RGBHistogram {
-        guard count > 1,
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(data: nil, width: image.width, height: image.height,
-                                      bitsPerComponent: 8, bytesPerRow: image.width * 4,
-                                      space: colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
-              let data = context.data else {
-            return .empty
-        }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        let bytes = data.assumingMemoryBound(to: UInt8.self)
-        var red = [CGFloat](repeating: 0, count: count)
-        var green = red
-        var blue = red
-        let pixelCount = image.width * image.height
-        guard pixelCount > 0 else { return RGBHistogram(red: red, green: green, blue: blue) }
-        for index in 0..<pixelCount {
-            let offset = index * 4
-            red[min(count - 1, Int(CGFloat(bytes[offset]) / 255 * CGFloat(count)))] += 1
-            green[min(count - 1, Int(CGFloat(bytes[offset + 1]) / 255 * CGFloat(count)))] += 1
-            blue[min(count - 1, Int(CGFloat(bytes[offset + 2]) / 255 * CGFloat(count)))] += 1
-        }
-        return RGBHistogram(red: normalize(red), green: normalize(green), blue: normalize(blue))
+        snapshot(for: image, count: count).rgb
     }
 
     private static func normalize(_ values: [CGFloat]) -> [CGFloat] {
@@ -68,6 +57,11 @@ enum HistogramCalculator {
                     vDSP_Length(normalized.count))
         return normalized.map { CGFloat($0) }
     }
+}
+
+struct HistogramSnapshot {
+    let luminance: [CGFloat]
+    let rgb: RGBHistogram
 }
 
 struct RGBHistogram {

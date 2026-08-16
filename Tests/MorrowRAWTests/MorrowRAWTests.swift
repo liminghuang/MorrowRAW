@@ -4,6 +4,36 @@ import ImageIO
 import XCTest
 @testable import MorrowRAW
 
+private final class LockedScanResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedTotal = -1
+    private var storedBatches: [[String]] = []
+
+    func setTotal(_ total: Int) {
+        lock.lock()
+        storedTotal = total
+        lock.unlock()
+    }
+
+    func appendBatch(_ batch: [String]) {
+        lock.lock()
+        storedBatches.append(batch)
+        lock.unlock()
+    }
+
+    var total: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedTotal
+    }
+
+    var batches: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedBatches
+    }
+}
+
 final class CompatibilityTests: XCTestCase {
     func testDisplayDateUsesCalendarDateWithSlashSeparators() {
         XCTAssertEqual(PhotoMetadataReader.displayDate("2026:08:16 13:45:20"), "2026/08/16 13:45:20")
@@ -143,6 +173,20 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotEqual(histogram.red, histogram.blue)
     }
 
+    func testHistogramSnapshotMatchesIndividualCalculators() {
+        let image = CIImage(color: CIColor(red: 0.2, green: 0.6, blue: 0.9))
+            .cropped(to: CGRect(x: 0, y: 0, width: 16, height: 12))
+        guard let cgImage = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not render histogram source")
+            return
+        }
+        let snapshot = HistogramCalculator.snapshot(for: cgImage)
+        XCTAssertEqual(snapshot.luminance, HistogramCalculator.bins(for: cgImage))
+        XCTAssertEqual(snapshot.rgb.red, HistogramCalculator.rgbBins(for: cgImage).red)
+        XCTAssertEqual(snapshot.rgb.green, HistogramCalculator.rgbBins(for: cgImage).green)
+        XCTAssertEqual(snapshot.rgb.blue, HistogramCalculator.rgbBins(for: cgImage).blue)
+    }
+
     func testWhiteBalanceSamplerReturnsClampedTemperatureAndTint() {
         let image = CIImage(color: CIColor(red: 0.9, green: 0.5, blue: 0.1))
             .cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
@@ -240,10 +284,35 @@ final class CompatibilityTests: XCTestCase {
         try writeTestPNG(to: first, color: CIColor(red: 0.2, green: 0.3, blue: 0.4))
         try writeTestPNG(to: second, color: CIColor(red: 0.4, green: 0.3, blue: 0.2))
 
+        var progress: [(Int, Int)] = []
         let result = try ImageBatchExporter().export(urls: [first, second], to: output,
-                                                      format: .png, naming: .sequence)
+                                                      format: .png, naming: .sequence,
+                                                      onProgress: { progress.append(($0, $1)) })
         XCTAssertTrue(result.failures.isEmpty)
+        XCTAssertFalse(result.cancelled)
+        XCTAssertEqual(progress.map(\.0), [1, 2])
+        XCTAssertEqual(progress.map(\.1), [2, 2])
         XCTAssertEqual(result.writtenURLs.map(\.lastPathComponent), ["0001_edited.png", "0002_edited.png"])
+    }
+
+    func testBatchExporterHonoursCancellationBeforeStartingNextPhoto() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("away-photo-cancel-\(UUID().uuidString)")
+        let output = root.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first.png")
+        let second = root.appendingPathComponent("second.png")
+        try writeTestPNG(to: first, color: CIColor(red: 0.2, green: 0.3, blue: 0.4))
+        try writeTestPNG(to: second, color: CIColor(red: 0.4, green: 0.3, blue: 0.2))
+
+        let token = BatchExportCancellationToken()
+        token.cancel()
+        let result = try ImageBatchExporter().export(urls: [first, second], to: output, format: .png,
+                                                      shouldCancel: { token.isCancelled })
+        XCTAssertTrue(result.cancelled)
+        XCTAssertTrue(result.writtenURLs.isEmpty)
+        XCTAssertTrue(result.failures.isEmpty)
     }
 
     func testBatchExporterCanOverwriteExistingOutput() throws {
@@ -371,6 +440,12 @@ final class CompatibilityTests: XCTestCase {
         model.language = .english
         XCTAssertEqual(defaults.string(forKey: key), AppLanguage.english.rawValue)
         XCTAssertEqual(EditorViewModel().language, .english)
+        XCTAssertEqual(StudioText.filmstrip, "Filmstrip")
+        XCTAssertEqual(StudioText.loadingPhotos(2, 5), "Loading photos… 2/5")
+
+        defaults.set(AppLanguage.traditionalChinese.rawValue, forKey: key)
+        XCTAssertEqual(StudioText.filmstrip, "膠卷")
+        XCTAssertEqual(StudioText.loadingPhotos(2, 5), "正在讀取照片… 2/5")
     }
 
     @MainActor
@@ -415,7 +490,7 @@ final class CompatibilityTests: XCTestCase {
         try writeTestPNG(to: third, color: CIColor(red: 0.6, green: 0.5, blue: 0.4))
 
         let model = EditorViewModel()
-        model.open(urls: [first, second, third])
+        model.openSynchronously(urls: [first, second, third])
         model.adjustments.exposure = 1.5
         model.selectedPhotoIndices = [1]
         model.copyCurrentAdjustmentsToSelected()
@@ -439,7 +514,7 @@ final class CompatibilityTests: XCTestCase {
         try writeTestPNG(to: second, color: CIColor(red: 0.3, green: 0.2, blue: 0.1))
 
         let model = EditorViewModel()
-        model.open(urls: [first, second])
+        model.openSynchronously(urls: [first, second])
         model.selectedPhotoIndices = [1]
         model.applyPresetToSelected(.vivid)
 
@@ -589,6 +664,28 @@ final class CompatibilityTests: XCTestCase {
         let result = PhotoLibrary.scan(folder: folder)
 
         XCTAssertEqual(result.map(\.lastPathComponent), ["IMG2.ARW", "IMG10.JPG"])
+    }
+
+    func testPhotoLibraryIncrementalScanReportsTotalAndBatchesRawFiles() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("away-photo-library-incremental-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        for name in ["IMG10.ARW", "IMG2.ARW", "IMG1.ARW"] {
+            FileManager.default.createFile(atPath: folder.appendingPathComponent(name).path, contents: nil)
+        }
+        FileManager.default.createFile(atPath: folder.appendingPathComponent("preview.JPG").path, contents: nil)
+
+        let callbacks = LockedScanResults()
+        let result = PhotoLibrary.scanIncrementally(folder: folder, rawOnly: true, batchSize: 2,
+                                                    onTotal: { callbacks.setTotal($0) },
+                                                    onBatch: { callbacks.appendBatch($0.map(\.lastPathComponent)) })
+
+        XCTAssertEqual(callbacks.total, 3)
+        XCTAssertEqual(callbacks.batches.map(\.count), [2, 1])
+        XCTAssertEqual(callbacks.batches.flatMap { $0 }, ["IMG1.ARW", "IMG2.ARW", "IMG10.ARW"])
+        XCTAssertEqual(result.map(\.lastPathComponent), ["IMG1.ARW", "IMG2.ARW", "IMG10.ARW"])
     }
 
     func testPhotoLibraryIgnoresHiddenFilesAndDirectories() throws {

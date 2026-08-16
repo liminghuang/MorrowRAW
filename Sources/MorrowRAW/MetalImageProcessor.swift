@@ -448,8 +448,16 @@ final class MetalImageProcessor {
         }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+        // `original` and `ping` came from the pool; `pong` is a standalone
+        // texture. The final texture is still retained by the returned CIImage,
+        // so only recycle the pooled scratch texture when it is not the final
+        // result. Recycling the standalone `pong` would pollute the pool with
+        // an unleased texture, while recycling the final pooled texture would
+        // let a later render overwrite the CIImage's backing storage.
         texturePool.recycle(original)
-        texturePool.recycle(output)
+        if output === ping {
+            texturePool.recycle(output)
+        }
         guard commandBuffer.status == .completed,
               let result = CIImage(mtlTexture: previous, options: [.colorSpace: colorSpace]) else {
             return nil
@@ -533,7 +541,9 @@ final class MetalImageProcessor {
         let scratchTexture = output
         commandBuffer.addCompletedHandler { [texturePool] buffer in
             texturePool.recycle(original)
-            texturePool.recycle(scratchTexture)
+            if scratchTexture === ping {
+                texturePool.recycle(scratchTexture)
+            }
             guard buffer.status == .completed,
                   let result = CIImage(mtlTexture: finalTexture, options: [.colorSpace: colorSpace]) else {
                 completion(nil)

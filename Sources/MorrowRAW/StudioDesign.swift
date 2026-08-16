@@ -30,6 +30,7 @@ enum StudioText {
         UserDefaults.standard.string(forKey: "MorrowRAW.language") == AppLanguage.english.rawValue
     }
     private static func t(_ zh: String, _ en: String) -> String { english ? en : zh }
+    static func localized(_ zh: String, _ en: String) -> String { t(zh, en) }
     static var library: String { t("資料庫", "Library") }
     static var adjustments: String { t("調整", "Adjustments") }
     static var presets: String { t("預設", "Presets") }
@@ -59,6 +60,38 @@ enum StudioText {
     static var after: String { t("修圖後 · 已編輯", "AFTER · Edited") }
     static var jpegQuality: String { t("JPEG 品質", "JPEG Quality") }
     static var language: String { t("語言", "Language") }
+    static var ok: String { t("好", "OK") }
+    static var cancel: String { t("取消", "Cancel") }
+    static var save: String { t("儲存", "Save") }
+    static var photoOpenError: String { t("無法開啟照片", "Unable to open photo") }
+    static var unknownError: String { t("未知錯誤", "Unknown error") }
+    static var addCustomPreset: String { t("新增自訂預設", "Add Custom Preset") }
+    static var presetName: String { t("預設名稱", "Preset Name") }
+    static var exporting: String { t("正在匯出", "Exporting") }
+    static var readingPhotos: String { t("正在讀取照片", "Loading photos") }
+    static var foundPhotos: String { t("已找到", "Found") }
+    static var decodingRAW: String { t("正在解碼 RAW", "Decoding RAW") }
+    static var openPhotoToEdit: String { t("開啟照片開始編輯", "Open a photo to start editing") }
+    static var photoInfo: String { t("照片資訊", "Photo Info") }
+    static var filmstrip: String { t("膠卷", "Filmstrip") }
+    static var zoomIn: String { t("放大", "Zoom In") }
+    static var zoomOut: String { t("縮小", "Zoom Out") }
+    static var selected: String { t("選取", "Select") }
+    static var batch: String { t("批次", "Batch") }
+    static var allPhotos: String { t("全部照片…", "All Photos…") }
+    static var folder: String { t("資料夾", "Folder") }
+    static var singlePhoto: String { t("單張照片", "Single Photo") }
+
+    static func exporting(_ completed: Int, _ total: Int) -> String {
+        "\(exporting) \(completed)/\(total)"
+    }
+
+    static func loadingPhotos(_ loaded: Int, _ total: Int) -> String {
+        total > 0 ? "\(readingPhotos)… \(loaded)/\(total)" : "\(readingPhotos)… \(foundPhotos) \(loaded)"
+    }
+
+    static func decoding(_ name: String) -> String { "\(decodingRAW)：\(name)" }
+    static func photoCount(_ count: Int) -> String { english ? "\(count) photos" : "\(count) 張" }
 }
 
 struct StudioSection<Content: View>: View {
@@ -149,7 +182,7 @@ struct StudioThumbnail: View {
                     return nil
                 }
                 let decodeTask = Task.detached(priority: .utility) {
-                    PhotoThumbnailLoader().loadCGImage(url: url)
+                    PhotoThumbnailLoader.shared.loadCGImage(url: url)
                 }
                 let result = await decodeTask.value
                 await ThumbnailDecodeGate.shared.release()

@@ -24,6 +24,17 @@ enum RenderQuality {
 }
 
 final class ImageRenderer {
+    /// CIContext is thread-safe and expensive to construct. Interactive
+    /// previews share one context instead of creating one for every slider
+    /// render task.
+    static let shared = ImageRenderer()
+
+    private static let toneCurveCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private let context: CIContext
 
     init() {
@@ -651,34 +662,43 @@ final class ImageRenderer {
 
     private func applyToneCurve(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
         let dimension = 32
-        var cube = [Float]()
-        cube.reserveCapacity(dimension * dimension * dimension * 4)
+        let key = "\(adjustments.contrast)|\(adjustments.highlights)|\(adjustments.shadows)|\(adjustments.whites)|\(adjustments.blacks)" as NSString
+        let cubeData: Data
+        if let cached = Self.toneCurveCache.object(forKey: key) {
+            cubeData = Data(cached)
+        } else {
+            var cube = [Float]()
+            cube.reserveCapacity(dimension * dimension * dimension * 4)
 
-        for blue in 0..<dimension {
-            for green in 0..<dimension {
-                for red in 0..<dimension {
-                    let r = Float(red) / Float(dimension - 1)
-                    let g = Float(green) / Float(dimension - 1)
-                    let b = Float(blue) / Float(dimension - 1)
-                    cube.append(ToneCurve.value(r, adjustments: adjustments))
-                    cube.append(ToneCurve.value(g, adjustments: adjustments))
-                    cube.append(ToneCurve.value(b, adjustments: adjustments))
-                    cube.append(1)
+            for blue in 0..<dimension {
+                for green in 0..<dimension {
+                    for red in 0..<dimension {
+                        let r = Float(red) / Float(dimension - 1)
+                        let g = Float(green) / Float(dimension - 1)
+                        let b = Float(blue) / Float(dimension - 1)
+                        cube.append(ToneCurve.value(r, adjustments: adjustments))
+                        cube.append(ToneCurve.value(g, adjustments: adjustments))
+                        cube.append(ToneCurve.value(b, adjustments: adjustments))
+                        cube.append(1)
+                    }
                 }
             }
+            cubeData = Data(bytes: cube, count: cube.count * MemoryLayout<Float>.size)
+            Self.toneCurveCache.setObject(cubeData as NSData, forKey: key)
         }
 
         let filter = CIFilter(name: "CIColorCube")
         filter?.setValue(image, forKey: kCIInputImageKey)
         filter?.setValue(dimension, forKey: "inputCubeDimension")
-        filter?.setValue(Data(bytes: cube, count: cube.count * MemoryLayout<Float>.size),
-                         forKey: "inputCubeData")
+        filter?.setValue(cubeData, forKey: "inputCubeData")
         return filter?.outputImage ?? image
     }
 
     func makePreview(_ image: CIImage, adjustments: ImageAdjustments,
                      maxDimension: CGFloat = 1800,
                      quality: RenderQuality = .finalPreview) -> CGImage? {
+        let signpostID = MorrowPerformanceLog.begin("Preview render")
+        defer { MorrowPerformanceLog.end("Preview render", id: signpostID) }
         let dimension = min(maxDimension, quality.previewDimension)
         let sourceScale = min(1, dimension / max(image.extent.width, image.extent.height))
         let previewSource = sourceScale < 1
@@ -695,6 +715,8 @@ final class ImageRenderer {
     func makePreviewAsync(_ image: CIImage, adjustments: ImageAdjustments,
                           maxDimension: CGFloat = 1800,
                           quality: RenderQuality = .finalPreview) async -> CGImage? {
+        let signpostID = MorrowPerformanceLog.begin("Preview render")
+        defer { MorrowPerformanceLog.end("Preview render", id: signpostID) }
         let dimension = min(maxDimension, quality.previewDimension)
         let sourceScale = min(1, dimension / max(image.extent.width, image.extent.height))
         let previewSource = sourceScale < 1

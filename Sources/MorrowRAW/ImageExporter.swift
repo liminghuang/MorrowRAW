@@ -125,8 +125,7 @@ final class ImageExporter {
                 dpi: CGFloat = 300,
                 preserveMetadata: Bool = true,
                 watermark: WatermarkSettings = WatermarkSettings()) throws {
-        let renderer = ImageRenderer()
-        let output = renderer.render(source, adjustments: adjustments)
+        let output = ImageRenderer.shared.render(source, adjustments: adjustments)
         guard let renderedImage = context.createCGImage(output, from: output.extent) else {
             throw ImageExporterError.cannotRender
         }
@@ -213,9 +212,27 @@ final class ImageExporter {
     }
 }
 
+final class BatchExportCancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
+
 struct BatchExportResult {
     let writtenURLs: [URL]
     let failures: [(URL, Error)]
+    let cancelled: Bool
 }
 
 final class ImageBatchExporter {
@@ -233,12 +250,17 @@ final class ImageBatchExporter {
                 dpi: CGFloat = 300, preserveMetadata: Bool = true,
                 naming: BatchExportNaming = .original,
                 conflict: BatchConflictMode = .appendNumber,
-                watermark: WatermarkSettings = WatermarkSettings()) throws -> BatchExportResult {
+                watermark: WatermarkSettings = WatermarkSettings(),
+                onProgress: ((Int, Int) -> Void)? = nil,
+                shouldCancel: (() -> Bool)? = nil) throws -> BatchExportResult {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var written: [URL] = []
         var failures: [(URL, Error)] = []
 
-        for url in urls {
+        for (index, url) in urls.enumerated() {
+            if shouldCancel?() == true {
+                return BatchExportResult(writtenURLs: written, failures: failures, cancelled: true)
+            }
             do {
                 let source = try decoder.decode(url: url)
                 var adjustments = ImageAdjustments()
@@ -260,8 +282,9 @@ final class ImageBatchExporter {
             } catch {
                 failures.append((url, error))
             }
+            onProgress?(index + 1, urls.count)
         }
-        return BatchExportResult(writtenURLs: written, failures: failures)
+        return BatchExportResult(writtenURLs: written, failures: failures, cancelled: false)
     }
 
     private func uniqueURL(folder: URL, baseName: String, format: ImageExportFormat) -> URL {
