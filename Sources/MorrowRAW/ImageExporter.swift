@@ -235,6 +235,51 @@ struct BatchExportResult {
     let cancelled: Bool
 }
 
+private final class BatchExportWorkerState: @unchecked Sendable {
+    struct Failure {
+        let url: URL
+        let error: Error
+    }
+
+    private let lock = NSLock()
+    private var nextIndex = 0
+    private var completed = 0
+    private var written: [URL?]
+    private var failures: [Failure?]
+
+    init(count: Int) {
+        written = Array(repeating: nil, count: count)
+        failures = Array(repeating: nil, count: count)
+    }
+
+    func takeNext(total: Int) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard nextIndex < total else { return nil }
+        defer { nextIndex += 1 }
+        return nextIndex
+    }
+
+    func record(index: Int, outputURL: URL?, failure: Failure?) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        written[index] = outputURL
+        failures[index] = failure
+        completed += 1
+        return completed
+    }
+
+    func snapshot(cancelled: Bool) -> BatchExportResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return BatchExportResult(
+            writtenURLs: written.compactMap { $0 },
+            failures: failures.compactMap { $0 }.map { ($0.url, $0.error) },
+            cancelled: cancelled
+        )
+    }
+}
+
 final class ImageBatchExporter {
     private let decoder: PhotoDecoder
     private let exporter: ImageExporter
@@ -253,54 +298,85 @@ final class ImageBatchExporter {
                 watermark: WatermarkSettings = WatermarkSettings(),
                 onProgress: ((Int, Int) -> Void)? = nil,
                 shouldCancel: (() -> Bool)? = nil) throws -> BatchExportResult {
+        let signpostID = MorrowPerformanceLog.begin("Batch export")
+        defer { MorrowPerformanceLog.end("Batch export", id: signpostID) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        var written: [URL] = []
-        var failures: [(URL, Error)] = []
-
-        for (index, url) in urls.enumerated() {
-            if shouldCancel?() == true {
-                return BatchExportResult(writtenURLs: written, failures: failures, cancelled: true)
-            }
-            do {
-                let source = try decoder.decode(url: url)
-                var adjustments = ImageAdjustments()
-                let xmlURL = url.deletingLastPathComponent()
-                    .appendingPathComponent("RAW_TEMP")
-                    .appendingPathComponent(url.lastPathComponent + ".rawpipe.xml")
-                if FileManager.default.fileExists(atPath: xmlURL.path) {
-                    try adjustments.load(from: xmlURL)
-                }
-
-                let base = baseName(for: url, index: written.count, naming: naming)
-                let outputURL = outputURL(folder: folder, baseName: base, format: format, conflict: conflict)
-                try exporter.export(source: source, adjustments: adjustments, to: outputURL,
-                                    format: format, quality: quality,
-                                    maxLongEdge: maxLongEdge, sourceURL: url,
-                                    dpi: dpi, preserveMetadata: preserveMetadata,
-                                    watermark: watermark)
-                written.append(outputURL)
-            } catch {
-                failures.append((url, error))
-            }
-            onProgress?(index + 1, urls.count)
+        guard !urls.isEmpty else {
+            return BatchExportResult(writtenURLs: [], failures: [], cancelled: false)
         }
-        return BatchExportResult(writtenURLs: written, failures: failures, cancelled: false)
+
+        // Reserve output paths before workers start so append-number naming
+        // cannot race when two photos finish at nearly the same time.
+        var reservedPaths = Set<String>()
+        let jobs: [(url: URL, outputURL: URL)] = urls.enumerated().map { index, url in
+            let base = baseName(for: url, index: index, naming: naming)
+            let output = outputURL(folder: folder, baseName: base, format: format,
+                                   conflict: conflict, reservedPaths: &reservedPaths)
+            return (url, output)
+        }
+
+        let state = BatchExportWorkerState(count: jobs.count)
+        let progressLock = NSLock()
+        let workerCount = min(jobs.count, max(1, min(2, ProcessInfo.processInfo.activeProcessorCount)))
+        DispatchQueue.concurrentPerform(iterations: workerCount) { _ in
+            while shouldCancel?() != true, let index = state.takeNext(total: jobs.count) {
+                let job = jobs[index]
+                autoreleasepool {
+                    do {
+                        let source = try decoder.decode(url: job.url)
+                        var adjustments = ImageAdjustments()
+                        let xmlURL = job.url.deletingLastPathComponent()
+                            .appendingPathComponent("RAW_TEMP")
+                            .appendingPathComponent(job.url.lastPathComponent + ".rawpipe.xml")
+                        if FileManager.default.fileExists(atPath: xmlURL.path) {
+                            try adjustments.load(from: xmlURL)
+                        }
+                        try exporter.export(source: source, adjustments: adjustments, to: job.outputURL,
+                                            format: format, quality: quality,
+                                            maxLongEdge: maxLongEdge, sourceURL: job.url,
+                                            dpi: dpi, preserveMetadata: preserveMetadata,
+                                            watermark: watermark)
+                        let completed = state.record(index: index, outputURL: job.outputURL, failure: nil)
+                        if let onProgress {
+                            progressLock.lock()
+                            onProgress(completed, jobs.count)
+                            progressLock.unlock()
+                        }
+                    } catch {
+                        let completed = state.record(
+                            index: index, outputURL: nil,
+                            failure: BatchExportWorkerState.Failure(url: job.url, error: error)
+                        )
+                        if let onProgress {
+                            progressLock.lock()
+                            onProgress(completed, jobs.count)
+                            progressLock.unlock()
+                        }
+                    }
+                }
+            }
+        }
+        return state.snapshot(cancelled: shouldCancel?() == true)
     }
 
-    private func uniqueURL(folder: URL, baseName: String, format: ImageExportFormat) -> URL {
+    private func outputURL(folder: URL, baseName: String, format: ImageExportFormat,
+                           conflict: BatchConflictMode,
+                           reservedPaths: inout Set<String>) -> URL {
+        let baseURL = folder.appendingPathComponent(baseName + "." + format.fileExtension)
+        if conflict == .overwrite {
+            reservedPaths.insert(baseURL.path)
+            return baseURL
+        }
         var index = 0
         while true {
             let suffix = index == 0 ? "" : "_\(index + 1)"
             let candidate = folder.appendingPathComponent(baseName + suffix + "." + format.fileExtension)
-            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            if !FileManager.default.fileExists(atPath: candidate.path), !reservedPaths.contains(candidate.path) {
+                reservedPaths.insert(candidate.path)
+                return candidate
+            }
             index += 1
         }
-    }
-
-    private func outputURL(folder: URL, baseName: String, format: ImageExportFormat,
-                           conflict: BatchConflictMode) -> URL {
-        let baseURL = folder.appendingPathComponent(baseName + "." + format.fileExtension)
-        return conflict == .overwrite ? baseURL : uniqueURL(folder: folder, baseName: baseName, format: format)
     }
 
     private func baseName(for url: URL, index: Int, naming: BatchExportNaming) -> String {

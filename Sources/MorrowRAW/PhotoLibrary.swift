@@ -32,8 +32,11 @@ struct PhotoLibrary {
     static func scanIncrementally(folder: URL, includeHidden: Bool = false, rawOnly: Bool = false,
                                   batchSize: Int = 32,
                                   onTotal: @Sendable (Int) -> Void = { _ in },
+                                  onScanProgress: @Sendable (Int, Int) -> Void = { _, _ in },
                                   shouldCancel: @Sendable () -> Bool = { false },
                                   onBatch: @Sendable ([URL]) -> Void) -> [URL] {
+        let signpostID = MorrowPerformanceLog.begin("Folder scan")
+        defer { MorrowPerformanceLog.end("Folder scan", id: signpostID) }
         let state = includeHidden ? PhotoLibraryState() : PhotoLibraryState.load(folder: folder)
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: folder,
@@ -42,12 +45,24 @@ struct PhotoLibrary {
         ) else { return [] }
 
         let extensions = rawOnly ? rawExtensions : supportedExtensions
-        let candidates = urls.filter { url in
+        onScanProgress(0, urls.count)
+        var candidates: [URL] = []
+        candidates.reserveCapacity(urls.count)
+        var scannedCount = 0
+        for (index, url) in urls.enumerated() {
+            if shouldCancel() { break }
+            scannedCount = index + 1
             guard extensions.contains(url.pathExtension.lowercased()),
                   let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-                  values.isRegularFile == true else { return false }
-            return includeHidden || !state.contains(url)
-        }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                  values.isRegularFile == true else {
+                if (index + 1) % 32 == 0 { onScanProgress(index + 1, urls.count) }
+                continue
+            }
+            if includeHidden || !state.contains(url) { candidates.append(url) }
+            if (index + 1) % 32 == 0 { onScanProgress(index + 1, urls.count) }
+        }
+        onScanProgress(scannedCount, urls.count)
+        candidates.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         onTotal(candidates.count)
 
         var found: [URL] = []

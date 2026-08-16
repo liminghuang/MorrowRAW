@@ -4,7 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
-final class EditorViewModel: ObservableObject {
+final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var photos: [URL] = []
     @Published var selectedIndex = 0
     @Published var selectedPhotoIndices: Set<Int> = []
@@ -17,7 +17,8 @@ final class EditorViewModel: ObservableObject {
     @Published var preview: NSImage?
     @Published var histogram: [CGFloat] = []
     @Published var rgbHistogram = RGBHistogram.empty
-    @Published var sourceName = "尚未選擇照片"
+    @Published var sourceName = StudioText.notSelected
+    @Published private(set) var previewMaxDimension: CGFloat = 1800
     @Published var errorMessage: String?
     @Published var healingBrushEnabled = false
     @Published var zoomScale = 1.0
@@ -38,10 +39,17 @@ final class EditorViewModel: ObservableObject {
     @Published private(set) var isLoadingFolder = false
     @Published private(set) var folderLoadCount = 0
     @Published private(set) var folderTotalCount = 0
+    @Published private(set) var folderScannedCount = 0
+    @Published private(set) var folderScanEntryCount = 0
     @Published private(set) var isLoadingPhoto = false
+    @Published private(set) var isPhotoPreviewReady = false
     @Published private(set) var isExporting = false
+    @Published private(set) var isSingleExporting = false
     @Published private(set) var exportCompletedCount = 0
     @Published private(set) var exportTotalCount = 0
+    @Published private(set) var isBatchAdjusting = false
+    @Published private(set) var batchAdjustmentCompleted = 0
+    @Published private(set) var batchAdjustmentTotal = 0
     @Published private(set) var recentFolders: [String] = []
     @Published var appearance: AppAppearance = AppAppearance(rawValue:
         UserDefaults.standard.string(forKey: "MorrowRAW.appearance") ?? "") ?? .system {
@@ -53,7 +61,6 @@ final class EditorViewModel: ObservableObject {
     }
 
     private let renderer = ImageRenderer.shared
-    private let exporter = ImageExporter()
     private var source: CIImage?
     private var currentPhotoURL: URL?
     var currentFolderURL: URL?
@@ -62,14 +69,24 @@ final class EditorViewModel: ObservableObject {
     private var adjustmentURL: URL?
     private var undoStack: [ImageAdjustments] = []
     private var redoStack: [ImageAdjustments] = []
+    private var interactiveHistoryBaseline: ImageAdjustments?
     private var copiedAdjustments: ImageAdjustments?
     private var lastHistoryState = ImageAdjustments()
+    private var sourceGeneration = UUID()
+    private var cachedOriginalPreview: CGImage?
+    private var cachedOriginalPreviewAdjustments: ImageAdjustments?
+    private var cachedOriginalPreviewSourceGeneration: UUID?
     private var openURLObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
     private var folderScanTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
+    private var thumbnailPresentationTask: Task<Void, Never>?
     private var batchExportTask: Task<Void, Never>?
+    private var singleExportTask: Task<Void, Never>?
     private var batchExportCancellation: BatchExportCancellationToken?
+    private var batchAdjustmentTask: Task<Void, Never>?
+    private var batchAdjustmentCancellation: BatchAdjustmentCancellationToken?
+    private var thumbnailPrefetchTask: Task<Void, Never>?
     private var folderScanID = UUID()
     private var activeLoadID = UUID()
 
@@ -104,8 +121,13 @@ final class EditorViewModel: ObservableObject {
     deinit {
         folderScanTask?.cancel()
         loadTask?.cancel()
+        thumbnailPresentationTask?.cancel()
+        thumbnailPrefetchTask?.cancel()
+        singleExportTask?.cancel()
         batchExportCancellation?.cancel()
         batchExportTask?.cancel()
+        batchAdjustmentCancellation?.cancel()
+        batchAdjustmentTask?.cancel()
         if let openURLObserver { NotificationCenter.default.removeObserver(openURLObserver) }
         if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
     }
@@ -177,7 +199,7 @@ final class EditorViewModel: ObservableObject {
             PhotoLibrary.supportedExtensions.contains($0.pathExtension.lowercased())
         }
         guard !supported.isEmpty else {
-            errorMessage = "沒有支援的照片格式"
+            errorMessage = StudioText.localized("沒有支援的照片格式", "No supported photo formats")
             return
         }
         photos = supported
@@ -212,6 +234,56 @@ final class EditorViewModel: ObservableObject {
         loadInBackground(url: photos[index], copyIndex: 0)
     }
 
+    func movePhotoSelection(_ direction: MoveCommandDirection) {
+        guard !photos.isEmpty else { return }
+        let offset: Int
+        switch direction {
+        case .left: offset = -1
+        case .right: offset = 1
+        default: return
+        }
+        let nextIndex = min(max(selectedIndex + offset, 0), photos.count - 1)
+        guard nextIndex != selectedIndex else { return }
+        selectPhoto(at: nextIndex)
+    }
+
+    /// Returns nearby indices in navigation order, excluding the selected
+    /// photo itself. Keeping this deterministic also makes prefetch behavior
+    /// easy to validate without requiring a real RAW file in tests.
+    nonisolated static func nearbyThumbnailIndices(around index: Int, count: Int, radius: Int = 3) -> [Int] {
+        guard count > 0, count > 1, radius > 0, index >= 0, index < count else { return [] }
+        return (1...radius).flatMap { distance in
+            [index + distance, index - distance]
+        }.filter { $0 >= 0 && $0 < count }
+    }
+
+    nonisolated static func reconciledSelection(preferredURL: URL?, selectedURLs: Set<URL>, in photos: [URL]) -> (index: Int, selected: Set<Int>) {
+        guard !photos.isEmpty else { return (0, []) }
+        let index = preferredURL.flatMap { photos.firstIndex(of: $0) } ?? 0
+        let remapped = Set(selectedURLs.compactMap { selectedURL in
+            photos.firstIndex(of: selectedURL)
+        })
+        return (index, remapped.isEmpty ? [index] : remapped)
+    }
+
+    private func prefetchNearbyThumbnails(around index: Int) {
+        thumbnailPrefetchTask?.cancel()
+        let indices = Self.nearbyThumbnailIndices(around: index, count: photos.count)
+        let urls = indices.compactMap { photos.indices.contains($0) ? photos[$0] : nil }
+        guard !urls.isEmpty else { return }
+
+        thumbnailPrefetchTask = Task.detached(priority: .utility) {
+            await withTaskGroup(of: Void.self) { group in
+                for url in urls {
+                    group.addTask {
+                        guard !Task.isCancelled else { return }
+                        _ = await PhotoThumbnailLoader.shared.loadCGImageAsync(url: url)
+                    }
+                }
+            }
+        }
+    }
+
     func setPhotoSelection(at index: Int, selected: Bool) {
         guard photos.indices.contains(index) else { return }
         if selected {
@@ -219,6 +291,14 @@ final class EditorViewModel: ObservableObject {
         } else {
             selectedPhotoIndices.remove(index)
         }
+    }
+
+    func selectAllPhotos() {
+        selectedPhotoIndices = Set(photos.indices)
+    }
+
+    func clearPhotoSelection() {
+        selectedPhotoIndices.removeAll()
     }
 
     func toggleCurrentPhotoVisibility() {
@@ -240,10 +320,11 @@ final class EditorViewModel: ObservableObject {
                 selectedIndex = 0
                 source = nil
                 preview = nil
+                isPhotoPreviewReady = false
                 histogram = []
                 rgbHistogram = .empty
                 currentPhotoURL = nil
-                sourceName = "沒有可顯示的照片"
+                sourceName = StudioText.noDisplayablePhotos
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -258,10 +339,11 @@ final class EditorViewModel: ObservableObject {
             selectedIndex = 0
             source = nil
             preview = nil
+            isPhotoPreviewReady = false
             histogram = []
             rgbHistogram = .empty
             currentPhotoURL = nil
-            sourceName = "沒有可顯示的照片"
+            sourceName = StudioText.noDisplayablePhotos
             return
         }
         selectedIndex = min(selectedIndex, scanned.count - 1)
@@ -272,13 +354,19 @@ final class EditorViewModel: ObservableObject {
         activeLoadID = UUID()
         saveCurrentAdjustments()
         saveTask?.cancel()
+        renderTask?.cancel()
         loadTask?.cancel()
+        thumbnailPresentationTask?.cancel()
+        thumbnailPrefetchTask?.cancel()
         preview = nil
         beforeAfterOriginalPreview = nil
         beforeAfterEnabled = false
         histogram = []
         rgbHistogram = .empty
         isLoadingPhoto = false
+        isPhotoPreviewReady = false
+        source = nil
+        preparePhotoState(for: url, copyIndex: copyIndex)
         do {
             let image = try ApplePhotoDecoder().decode(url: url)
             applyLoadedPhoto(url: url, copyIndex: copyIndex, image: image,
@@ -291,24 +379,58 @@ final class EditorViewModel: ObservableObject {
     private func loadInBackground(url: URL, copyIndex: Int = 0) {
         saveCurrentAdjustments()
         saveTask?.cancel()
+        renderTask?.cancel()
         loadTask?.cancel()
+        thumbnailPresentationTask?.cancel()
+        thumbnailPrefetchTask?.cancel()
         preview = nil
         beforeAfterOriginalPreview = nil
         beforeAfterEnabled = false
         histogram = []
         rgbHistogram = .empty
+        source = nil
+        preparePhotoState(for: url, copyIndex: copyIndex)
         sourceName = url.lastPathComponent
         isLoadingPhoto = true
+        isPhotoPreviewReady = false
         let loadID = UUID()
         activeLoadID = loadID
         loadTask = Task { [weak self] in
+            let thumbnailTask = Task.detached(priority: .utility) {
+                await PhotoThumbnailLoader.shared.loadCGImageAsync(url: url)
+            }
+            self?.thumbnailPresentationTask = Task { @MainActor [weak self] in
+                let thumbnail = await withTaskCancellationHandler(operation: {
+                    await thumbnailTask.value
+                }, onCancel: {
+                    thumbnailTask.cancel()
+                })
+                guard !Task.isCancelled,
+                      let self,
+                      self.activeLoadID == loadID,
+                      self.isLoadingPhoto else { return }
+                self.preview = thumbnail.map { NSImage(cgImage: $0, size: .zero) }
+                self.isPhotoPreviewReady = thumbnail != nil
+            }
             do {
-                let image = try await Task.detached(priority: .userInitiated) {
-                    try ApplePhotoDecoder().decode(url: url)
-                }.value
-                let exif = await Task.detached(priority: .utility) {
-                    PhotoMetadataReader.read(url: url)
-                }.value
+                let imageTask = Task.detached(priority: .userInitiated) {
+                    try Task.checkCancellation()
+                    return try ApplePhotoDecoder().decode(url: url)
+                }
+                let image = try await withTaskCancellationHandler(operation: {
+                    try await imageTask.value
+                }, onCancel: {
+                    imageTask.cancel()
+                })
+                let exifTask = Task.detached(priority: .utility) { () -> ExifData? in
+                    guard !Task.isCancelled else { return nil }
+                    return PhotoMetadataReader.read(url: url)
+                }
+                let exif = await withTaskCancellationHandler(operation: {
+                    await exifTask.value
+                }, onCancel: {
+                    exifTask.cancel()
+                })
                 guard !Task.isCancelled else { return }
                 guard let self, self.activeLoadID == loadID else { return }
                 self.applyLoadedPhoto(url: url, copyIndex: copyIndex, image: image, exif: exif)
@@ -324,30 +446,47 @@ final class EditorViewModel: ObservableObject {
         isLoadingPhoto = false
         errorMessage = nil
         source = image
+        sourceGeneration = UUID()
+        cachedOriginalPreview = nil
+        cachedOriginalPreviewAdjustments = nil
+        cachedOriginalPreviewSourceGeneration = nil
         currentPhotoURL = url
         virtualCopyIndex = copyIndex
         sourceName = url.lastPathComponent
         showOriginal = false
-        adjustments = ImageAdjustments()
         let xmlURL = adjustmentURL(for: url, copyIndex: copyIndex)
         adjustmentURL = xmlURL
+        if adjustments.cachedExif == nil {
+            adjustments.cachedExif = exif
+        }
+        scheduleRender()
+        prefetchNearbyThumbnails(around: selectedIndex)
+    }
+
+    /// Loads the editable sidecar state before decoding the RAW itself. This
+    /// lets slider changes made while the photo is loading survive until the
+    /// source image arrives and are rendered immediately afterwards.
+    private func preparePhotoState(for url: URL, copyIndex: Int) {
+        let xmlURL = adjustmentURL(for: url, copyIndex: copyIndex)
+        var nextAdjustments = ImageAdjustments()
         do {
             if FileManager.default.fileExists(atPath: xmlURL.path) {
-                try adjustments.load(from: xmlURL)
+                try nextAdjustments.load(from: xmlURL)
             }
         } catch {
             errorMessage = error.localizedDescription
         }
-        if adjustments.cachedExif == nil {
-            adjustments.cachedExif = exif
-        }
-        if !["Original", "3:2", "4:3", "16:9", "1:1"].contains(adjustments.cropAspectRatio) {
-            customCropRatio = adjustments.cropAspectRatio
-        }
+        adjustments = nextAdjustments
+        adjustmentURL = xmlURL
+        currentPhotoURL = url
+        virtualCopyIndex = copyIndex
+        customCropRatio = ["Original", "3:2", "4:3", "16:9", "1:1"].contains(adjustments.cropAspectRatio)
+            ? customCropRatio
+            : adjustments.cropAspectRatio
         undoStack.removeAll()
         redoStack.removeAll()
+        interactiveHistoryBaseline = nil
         lastHistoryState = adjustments
-        scheduleRender()
     }
 
     private func startFolderScan(_ folder: URL) {
@@ -357,17 +496,28 @@ final class EditorViewModel: ObservableObject {
         isLoadingFolder = true
         folderLoadCount = 0
         folderTotalCount = 0
+        folderScannedCount = 0
+        folderScanEntryCount = 0
         photos = []
         selectedIndex = 0
         selectedPhotoIndices = []
         let includeHidden = showHiddenPhotos
         let model = self
+        let scanProgressGate = ProgressUpdateGate()
         folderScanTask = Task.detached(priority: .userInitiated) {
             let scanned = PhotoLibrary.scanIncrementally(folder: folder, includeHidden: includeHidden, rawOnly: true,
+                                                         batchSize: 64,
                                                          onTotal: { total in
                 Task { @MainActor in
                     guard model.folderScanID == scanID, model.isLoadingFolder else { return }
                     model.folderTotalCount = total
+                }
+            }, onScanProgress: { scanned, total in
+                guard scanProgressGate.shouldPublish(completed: scanned, total: total) else { return }
+                Task { @MainActor in
+                    guard model.folderScanID == scanID, model.isLoadingFolder else { return }
+                    model.folderScannedCount = scanned
+                    model.folderScanEntryCount = total
                 }
             }, shouldCancel: {
                 Task.isCancelled
@@ -385,18 +535,30 @@ final class EditorViewModel: ObservableObject {
             })
             await MainActor.run {
                 guard model.folderScanID == scanID else { return }
+                let preferredURL = model.photos.indices.contains(model.selectedIndex)
+                    ? model.photos[model.selectedIndex]
+                    : model.currentPhotoURL
+                let selectedURLs = Set(model.selectedPhotoIndices.compactMap { index in
+                    model.photos.indices.contains(index) ? model.photos[index] : nil
+                })
                 model.folderScanTask = nil
                 model.isLoadingFolder = false
                 model.photos = scanned
-                if let first = scanned.first {
-                    model.selectedIndex = 0
-                    model.selectedPhotoIndices = [0]
-                    if model.currentPhotoURL != first && !model.isLoadingPhoto {
-                        model.loadInBackground(url: first, copyIndex: 0)
+                if !scanned.isEmpty {
+                    let selection = Self.reconciledSelection(
+                        preferredURL: preferredURL,
+                        selectedURLs: selectedURLs,
+                        in: scanned
+                    )
+                    model.selectedIndex = selection.index
+                    model.selectedPhotoIndices = selection.selected
+                    let selected = scanned[selection.index]
+                    if model.currentPhotoURL != selected && !model.isLoadingPhoto {
+                        model.loadInBackground(url: selected, copyIndex: 0)
                     }
                 }
                 if scanned.isEmpty {
-                    model.errorMessage = "資料夾中沒有支援的照片格式"
+                    model.errorMessage = StudioText.localized("資料夾中沒有支援的照片格式", "No supported photo formats in this folder")
                 }
             }
         }
@@ -406,16 +568,25 @@ final class EditorViewModel: ObservableObject {
         folderScanID = UUID()
         folderScanTask?.cancel()
         loadTask?.cancel()
+        thumbnailPresentationTask?.cancel()
+        thumbnailPrefetchTask?.cancel()
+        renderTask?.cancel()
         folderScanTask = nil
         isLoadingFolder = false
         photos = []
         selectedPhotoIndices = []
         isLoadingPhoto = false
+        isPhotoPreviewReady = false
         folderTotalCount = 0
+        folderScannedCount = 0
+        folderScanEntryCount = 0
     }
 
     private func prepareForFolderChange(to folder: URL) {
         saveCurrentAdjustments()
+        renderTask?.cancel()
+        thumbnailPresentationTask?.cancel()
+        thumbnailPrefetchTask?.cancel()
         currentFolderURL = folder
         photos = []
         selectedIndex = 0
@@ -426,9 +597,13 @@ final class EditorViewModel: ObservableObject {
         histogram = []
         rgbHistogram = .empty
         source = nil
+        sourceGeneration = UUID()
+        cachedOriginalPreview = nil
+        cachedOriginalPreviewAdjustments = nil
+        cachedOriginalPreviewSourceGeneration = nil
         currentPhotoURL = nil
         adjustmentURL = nil
-        sourceName = "尚未選擇照片"
+        sourceName = StudioText.notSelected
         showOriginal = false
         undoStack.removeAll()
         redoStack.removeAll()
@@ -436,9 +611,29 @@ final class EditorViewModel: ObservableObject {
     }
 
     func scheduleRender() {
+        scheduleRender(recordHistory: true)
+    }
+
+    /// Keeps preview work proportional to the visible canvas. A small window
+    /// should not render a fixed 1800px image, while a large Retina canvas
+    /// benefits from a little more detail. The bounds prevent resize events
+    /// from creating either tiny blurry previews or excessive GPU work.
+    func updatePreviewViewport(_ size: CGSize) {
+        let longestEdge = max(size.width, size.height)
+        guard longestEdge.isFinite, longestEdge > 0 else { return }
+        let target = min(2400, max(900, (longestEdge * 2).rounded()))
+        guard abs(target - previewMaxDimension) >= 128 else { return }
+        previewMaxDimension = target
+        if source != nil { scheduleRender(recordHistory: false) }
+    }
+
+    func scheduleRender(recordHistory: Bool) {
+        // User-driven edits take priority over nearby-thumbnail prefetching.
+        // The prefetch will restart when the next photo finishes loading.
+        thumbnailPrefetchTask?.cancel()
         renderTask?.cancel()
         guard let source else { return }
-        recordHistoryIfNeeded()
+        if recordHistory { recordHistoryIfNeeded() }
         let current = showOriginal ? originalPreviewAdjustments() : adjustments
         let editedAdjustments = adjustments
         let compare = beforeAfterEnabled && !showOriginal
@@ -446,51 +641,60 @@ final class EditorViewModel: ObservableObject {
         renderTask = Task {
             try? await Task.sleep(for: .milliseconds(70))
             guard !Task.isCancelled else { return }
-            let interactivePair = await Task.detached(priority: .userInitiated) {
-                let renderer = ImageRenderer.shared
-                let edited = await renderer.makePreviewAsync(
-                    source, adjustments: compare ? editedAdjustments : current, quality: .interactive
-                )
-                let original = compare
-                    ? await renderer.makePreviewAsync(source, adjustments: originalAdjustments,
-                                                      quality: .interactive)
-                    : nil
-                return (edited, original)
-            }.value
+            guard let interactivePair = await self.renderPreviewPair(
+                source: source,
+                editedAdjustments: compare ? editedAdjustments : current,
+                originalAdjustments: originalAdjustments,
+                compare: compare,
+                quality: .interactive
+            ) else { return }
             guard !Task.isCancelled, let interactivePreview = interactivePair.0 else { return }
             self.preview = NSImage(cgImage: interactivePreview, size: .zero)
             self.beforeAfterOriginalPreview = interactivePair.1.map { NSImage(cgImage: $0, size: .zero) }
-            let interactiveHistogram = await Task.detached(priority: .utility) {
-                HistogramCalculator.snapshot(for: interactivePreview)
-            }.value
-            guard !Task.isCancelled else { return }
-            self.histogram = interactiveHistogram.luminance
-            self.rgbHistogram = interactiveHistogram.rgb
+            if self.interactiveHistoryBaseline == nil {
+                let interactiveHistogram = await Task.detached(priority: .utility) {
+                    HistogramCalculator.snapshot(for: interactivePreview)
+                }.value
+                guard !Task.isCancelled else { return }
+                self.histogram = interactiveHistogram.luminance
+                self.rgbHistogram = interactiveHistogram.rgb
+            }
 
-            // Let the user see the responsive low-quality result first, then
-            // refine only if no newer adjustment cancelled this render task.
+            // During a slider drag, keep only the responsive preview active.
+            // finishInteractiveAdjustment() schedules the full refinement once
+            // the drag ends, so a brief pause cannot start an expensive render
+            // that competes with the next slider event.
+            guard self.interactiveHistoryBaseline == nil else { return }
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
-            let finalPair = await Task.detached(priority: .userInitiated) {
-                let renderer = ImageRenderer.shared
-                let edited = await renderer.makePreviewAsync(
-                    source, adjustments: compare ? editedAdjustments : current, quality: .finalPreview
-                )
-                let original = compare
-                    ? await renderer.makePreviewAsync(source, adjustments: originalAdjustments,
-                                                      quality: .finalPreview)
-                    : nil
-                return (edited, original)
-            }.value
+            let cachedOriginal = compare &&
+                self.cachedOriginalPreviewSourceGeneration == self.sourceGeneration &&
+                self.cachedOriginalPreviewAdjustments == originalAdjustments
+                ? self.cachedOriginalPreview : nil
+            guard let finalPair = await self.renderPreviewPair(
+                source: source,
+                editedAdjustments: compare ? editedAdjustments : current,
+                originalAdjustments: originalAdjustments,
+                compare: compare,
+                quality: .finalPreview,
+                cachedOriginal: cachedOriginal
+            ) else { return }
             guard !Task.isCancelled, let finalPreview = finalPair.0 else { return }
             self.preview = NSImage(cgImage: finalPreview, size: .zero)
             self.beforeAfterOriginalPreview = finalPair.1.map { NSImage(cgImage: $0, size: .zero) }
-            let finalHistogram = await Task.detached(priority: .utility) {
-                HistogramCalculator.snapshot(for: finalPreview)
-            }.value
-            guard !Task.isCancelled else { return }
-            self.histogram = finalHistogram.luminance
-            self.rgbHistogram = finalHistogram.rgb
+            if compare, let original = finalPair.1 {
+                self.cachedOriginalPreview = original
+                self.cachedOriginalPreviewAdjustments = originalAdjustments
+                self.cachedOriginalPreviewSourceGeneration = self.sourceGeneration
+            }
+            if self.interactiveHistoryBaseline == nil {
+                let finalHistogram = await Task.detached(priority: .utility) {
+                    HistogramCalculator.snapshot(for: finalPreview)
+                }.value
+                guard !Task.isCancelled else { return }
+                self.histogram = finalHistogram.luminance
+                self.rgbHistogram = finalHistogram.rgb
+            }
         }
 
         saveTask?.cancel()
@@ -500,6 +704,47 @@ final class EditorViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             try? savedAdjustments.save(to: self?.adjustmentURL ?? URL(fileURLWithPath: "/dev/null"))
         }
+    }
+
+    func beginInteractiveAdjustment() {
+        if interactiveHistoryBaseline == nil {
+            interactiveHistoryBaseline = adjustments
+        }
+    }
+
+    private func renderPreviewPair(source: CIImage,
+                                   editedAdjustments: ImageAdjustments,
+                                   originalAdjustments: ImageAdjustments,
+                                   compare: Bool,
+                                   quality: RenderQuality,
+                                   cachedOriginal: CGImage? = nil) async -> (CGImage?, CGImage?)? {
+        guard await PreviewRenderGate.shared.acquire() else { return nil }
+        guard !Task.isCancelled else {
+            await PreviewRenderGate.shared.release()
+            return nil
+        }
+        let maxDimension = previewMaxDimension
+        let pair = await Task.detached(priority: .userInitiated) {
+            let renderer = ImageRenderer.shared
+            let edited = await renderer.makePreviewAsync(
+                source, adjustments: editedAdjustments,
+                maxDimension: maxDimension, quality: quality
+            )
+            let original: CGImage?
+            if !compare {
+                original = nil
+            } else if let cachedOriginal {
+                original = cachedOriginal
+            } else {
+                original = await renderer.makePreviewAsync(
+                    source, adjustments: originalAdjustments,
+                    maxDimension: maxDimension, quality: quality
+                )
+            }
+            return (edited, original)
+        }.value
+        await PreviewRenderGate.shared.release()
+        return pair
     }
 
     func toggleShowOriginal() {
@@ -533,7 +778,7 @@ final class EditorViewModel: ObservableObject {
     }
 
     func export(format: ImageExportFormat) {
-        guard let source else { return }
+        guard let source, !isExporting, !isSingleExporting, !isBatchAdjusting else { return }
         saveCurrentAdjustments()
         saveExportPreferences()
         let panel = NSSavePanel()
@@ -542,22 +787,38 @@ final class EditorViewModel: ObservableObject {
             .deletingPathExtension().lastPathComponent + "_edited." + format.fileExtension
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        do {
-            try exporter.export(source: source, adjustments: adjustments, to: url, format: format,
-                                quality: exportQuality, maxLongEdge: exportMaxLongEdge > 0 ? exportMaxLongEdge : nil,
-                                sourceURL: currentPhotoURL,
-                                dpi: exportDPI, preserveMetadata: preserveMetadata,
-                                watermark: watermark)
-        } catch {
-            errorMessage = error.localizedDescription
+        let currentAdjustments = adjustments
+        let quality = exportQuality
+        let maxLongEdge = exportMaxLongEdge > 0 ? exportMaxLongEdge : nil
+        let sourceURL = currentPhotoURL
+        let dpi = exportDPI
+        let preserveMetadata = preserveMetadata
+        let watermark = watermark
+        isSingleExporting = true
+        singleExportTask = Task { [weak self] in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ImageExporter().export(source: source, adjustments: currentAdjustments,
+                                                to: url, format: format, quality: quality,
+                                                maxLongEdge: maxLongEdge, sourceURL: sourceURL,
+                                                dpi: dpi, preserveMetadata: preserveMetadata,
+                                                watermark: watermark)
+                }.value
+            } catch {
+                if !Task.isCancelled {
+                    self?.errorMessage = error.localizedDescription
+                }
+            }
+            self?.isSingleExporting = false
+            self?.singleExportTask = nil
         }
     }
 
     func exportAll(format: ImageExportFormat) {
-        guard !isExporting else { return }
+        guard !isExporting, !isSingleExporting, !isBatchAdjusting else { return }
         let exportURLs = PhotoLibrary.exportable(photos, from: currentFolderURL)
         guard !exportURLs.isEmpty else {
-            errorMessage = "沒有可匯出的照片"
+            errorMessage = StudioText.localized("沒有可匯出的照片", "No photos available for export")
             return
         }
         saveCurrentAdjustments()
@@ -582,6 +843,7 @@ final class EditorViewModel: ObservableObject {
         let naming = batchExportNaming
         let conflict = batchConflictMode
         let watermark = watermark
+        let progressGate = ProgressUpdateGate()
 
         batchExportTask = Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -591,6 +853,7 @@ final class EditorViewModel: ObservableObject {
                     preserveMetadata: preserveMetadata, naming: naming,
                     conflict: conflict, watermark: watermark,
                     onProgress: { completed, total in
+                        guard progressGate.shouldPublish(completed: completed, total: total) else { return }
                         Task { @MainActor [weak self] in
                             guard let self, self.isExporting else { return }
                             self.exportCompletedCount = completed
@@ -606,13 +869,19 @@ final class EditorViewModel: ObservableObject {
             self.batchExportCancellation = nil
             self.batchExportTask = nil
             guard let result else {
-                self.errorMessage = "批次匯出失敗"
+                self.errorMessage = StudioText.localized("批次匯出失敗", "Batch export failed")
                 return
             }
             if result.cancelled {
-                self.errorMessage = "已取消匯出（已完成 \(result.writtenURLs.count) 張）"
+                self.errorMessage = StudioText.localized(
+                    "已取消匯出（已完成 \(result.writtenURLs.count) 張）",
+                    "Export cancelled (\(result.writtenURLs.count) completed)"
+                )
             } else if !result.failures.isEmpty {
-                self.errorMessage = "已匯出 \(result.writtenURLs.count) 張，\(result.failures.count) 張失敗"
+                self.errorMessage = StudioText.localized(
+                    "已匯出 \(result.writtenURLs.count) 張，\(result.failures.count) 張失敗",
+                    "Exported \(result.writtenURLs.count); \(result.failures.count) failed"
+                )
             }
         }
     }
@@ -644,7 +913,7 @@ final class EditorViewModel: ObservableObject {
     func applyCustomCropRatio() {
         let components = customCropRatio.split(separator: ":", maxSplits: 1).compactMap { Double($0) }
         guard components.count == 2, components.allSatisfy({ $0 > 0 }) else {
-            errorMessage = "裁切比例格式應為寬:高，例如 5:4"
+            errorMessage = StudioText.localized("裁切比例格式應為寬:高，例如 5:4", "Crop ratio must be width:height, for example 5:4")
             return
         }
         adjustments.cropAspectRatio = "\(components[0]):\(components[1])"
@@ -734,12 +1003,7 @@ final class EditorViewModel: ObservableObject {
 
     func applyPresetToAll(_ preset: BuiltInPreset) {
         guard photos.count > 1 else { return }
-        saveCurrentAdjustments()
-        let result = BatchAdjustmentService.applyPreset(preset, to: photos)
-        load(url: photos[selectedIndex], copyIndex: virtualCopyIndex)
-        if result.failureCount > 0 {
-            errorMessage = "已更新 \(result.updatedCount) 張，\(result.failureCount) 張失敗"
-        }
+        startBatchAdjustment(urls: photos, operation: .preset(preset))
     }
 
     func applyPresetToSelected(_ preset: BuiltInPreset) {
@@ -748,24 +1012,12 @@ final class EditorViewModel: ObservableObject {
             .compactMap { photos.indices.contains($0) ? photos[$0] : nil }
         let exportableTargets = PhotoLibrary.exportable(targets, from: currentFolderURL)
         guard !exportableTargets.isEmpty else { return }
-        saveCurrentAdjustments()
-        let result = BatchAdjustmentService.applyPreset(preset, to: exportableTargets)
-        if photos.indices.contains(selectedIndex) {
-            load(url: photos[selectedIndex], copyIndex: virtualCopyIndex)
-        }
-        if result.failureCount > 0 {
-            errorMessage = "已更新 \(result.updatedCount) 張，\(result.failureCount) 張失敗"
-        }
+        startBatchAdjustment(urls: exportableTargets, operation: .preset(preset))
     }
 
     func copyCurrentAdjustmentsToAll() {
         guard photos.count > 1 else { return }
-        saveCurrentAdjustments()
-        let result = BatchAdjustmentService.copy(adjustments, to: photos)
-        load(url: photos[selectedIndex], copyIndex: virtualCopyIndex)
-        if result.failureCount > 0 {
-            errorMessage = "已更新 \(result.updatedCount) 張，\(result.failureCount) 張失敗"
-        }
+        startBatchAdjustment(urls: photos, operation: .copy(adjustments))
     }
 
     func copyCurrentAdjustmentsToSelected() {
@@ -774,14 +1026,76 @@ final class EditorViewModel: ObservableObject {
             .compactMap { photos.indices.contains($0) ? photos[$0] : nil }
         let exportableTargets = PhotoLibrary.exportable(targets, from: currentFolderURL)
         guard !exportableTargets.isEmpty else { return }
+        startBatchAdjustment(urls: exportableTargets, operation: .copy(adjustments))
+    }
+
+    private enum BatchAdjustmentOperation: @unchecked Sendable {
+        case preset(BuiltInPreset)
+        case copy(ImageAdjustments)
+    }
+
+    private func startBatchAdjustment(urls: [URL], operation: BatchAdjustmentOperation) {
+        guard !urls.isEmpty, !isBatchAdjusting else { return }
         saveCurrentAdjustments()
-        let result = BatchAdjustmentService.copy(adjustments, to: exportableTargets)
-        if photos.indices.contains(selectedIndex) {
-            load(url: photos[selectedIndex], copyIndex: virtualCopyIndex)
+        batchAdjustmentCancellation?.cancel()
+        let cancellation = BatchAdjustmentCancellationToken()
+        batchAdjustmentCancellation = cancellation
+        isBatchAdjusting = true
+        batchAdjustmentCompleted = 0
+        batchAdjustmentTotal = urls.count
+        let progressTarget = self
+        let progressGate = ProgressUpdateGate()
+
+        batchAdjustmentTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                let progress: @Sendable (Int, Int) -> Void = { completed, total in
+                    guard progressGate.shouldPublish(completed: completed, total: total) else { return }
+                    Task { @MainActor [weak progressTarget] in
+                        guard let progressTarget, progressTarget.isBatchAdjusting else { return }
+                        progressTarget.batchAdjustmentCompleted = completed
+                        progressTarget.batchAdjustmentTotal = total
+                    }
+                }
+                switch operation {
+                case .preset(let preset):
+                    return BatchAdjustmentService.applyPreset(
+                        preset, to: urls,
+                        shouldCancel: { cancellation.isCancelled },
+                        onProgress: progress
+                    )
+                case .copy(let source):
+                    return BatchAdjustmentService.copy(
+                        source, to: urls,
+                        shouldCancel: { cancellation.isCancelled },
+                        onProgress: progress
+                    )
+                }
+            }.value
+
+            guard let self, self.isBatchAdjusting else { return }
+            self.isBatchAdjusting = false
+            self.batchAdjustmentCancellation = nil
+            self.batchAdjustmentTask = nil
+            if self.photos.indices.contains(self.selectedIndex) {
+                self.loadInBackground(url: self.photos[self.selectedIndex], copyIndex: self.virtualCopyIndex)
+            }
+            if result.cancelled {
+                self.errorMessage = StudioText.localized(
+                    "批次調整已取消，已更新 \(result.updatedCount) 張",
+                    "Batch adjustment cancelled; \(result.updatedCount) updated"
+                )
+            } else if result.failureCount > 0 {
+                self.errorMessage = StudioText.localized(
+                    "已更新 \(result.updatedCount) 張，\(result.failureCount) 張失敗",
+                    "Updated \(result.updatedCount); \(result.failureCount) failed"
+                )
+            }
         }
-        if result.failureCount > 0 {
-            errorMessage = "已更新 \(result.updatedCount) 張，\(result.failureCount) 張失敗"
-        }
+    }
+
+    func cancelBatchAdjustment() {
+        guard isBatchAdjusting else { return }
+        batchAdjustmentCancellation?.cancel()
     }
 
     /// Copies only editable values. The destination keeps its own EXIF metadata.
@@ -868,7 +1182,25 @@ final class EditorViewModel: ObservableObject {
         guard adjustments.gradients.indices.contains(index) else { return }
         adjustments.gradients[index].centerX = min(1, max(0, point.x))
         adjustments.gradients[index].centerY = min(1, max(0, point.y))
-        scheduleRender()
+        scheduleRender(recordHistory: false)
+    }
+
+    func finishInteractiveAdjustment() {
+        let wasInteractive = interactiveHistoryBaseline != nil
+        if let baseline = interactiveHistoryBaseline {
+            if baseline != adjustments {
+                undoStack.append(baseline)
+                redoStack.removeAll()
+                lastHistoryState = adjustments
+                trimUndoHistory()
+            }
+            interactiveHistoryBaseline = nil
+        } else {
+            recordHistoryIfNeeded()
+        }
+        if wasInteractive {
+            scheduleRender(recordHistory: false)
+        }
     }
 
     func addHealSpot(inpaint: Bool) {
@@ -901,7 +1233,7 @@ final class EditorViewModel: ObservableObject {
         guard adjustments.healSpots.indices.contains(index) else { return }
         adjustments.healSpots[index].sourceX = min(1, max(0, point.x))
         adjustments.healSpots[index].sourceY = min(1, max(0, point.y))
-        scheduleRender()
+        scheduleRender(recordHistory: false)
     }
 
     func removeLastHealSpot() {
@@ -968,6 +1300,10 @@ final class EditorViewModel: ObservableObject {
         undoStack.append(lastHistoryState)
         redoStack.removeAll()
         lastHistoryState = adjustments
+        trimUndoHistory()
+    }
+
+    private func trimUndoHistory() {
         if undoStack.count > 50 {
             undoStack.removeFirst(undoStack.count - 50)
         }
@@ -980,6 +1316,9 @@ struct ContentView: View {
     var body: some View {
         StudioWorkspace(model: model)
             .preferredColorScheme(model.appearance.colorScheme)
+            .onMoveCommand { direction in
+                model.movePhotoSelection(direction)
+            }
             .onDisappear { model.flushPendingSave() }
             .onAppear {
                 if let delegate = NSApplication.shared.delegate as? AppDelegate {
@@ -1092,34 +1431,34 @@ struct ContentView: View {
                     AdjustmentSlider(title: "Exposure", value: $model.adjustments.exposure,
                                      range: -5...5, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Contrast", value: $model.adjustments.contrast,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.contrast, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Highlights", value: $model.adjustments.highlights,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.highlights, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Shadows", value: $model.adjustments.shadows,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.shadows, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Whites", value: $model.adjustments.whites,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.whites, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Blacks", value: $model.adjustments.blacks,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.blacks, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Temperature", value: $model.adjustments.temperature,
                                      range: 2000...12000, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Tint", value: $model.adjustments.tint,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.tint, onChange: model.scheduleRender)
                     Button(model.whiteBalancePickerEnabled ? "Click image to sample…" : "White Balance Picker") {
                         model.toggleWhiteBalancePicker()
                     }
                     AdjustmentSlider(title: "Saturation", value: $model.adjustments.saturation,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.saturation, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Vibrance", value: $model.adjustments.vibrance,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.vibrance, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Sharpening", value: $model.adjustments.sharpening,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.sharpening, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Noise Reduction", value: $model.adjustments.noiseReduction,
                                      range: 0...100, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Vignette", value: $model.adjustments.vignette,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.vignette, onChange: model.scheduleRender)
                     AdjustmentSlider(title: "Distortion", value: $model.adjustments.distortion,
-                                     range: -100...100, onChange: model.scheduleRender)
+                                     range: StudioAdjustmentRange.distortion, onChange: model.scheduleRender)
 
                     Text("Crop")
                         .font(.headline)
@@ -1172,16 +1511,16 @@ struct ContentView: View {
                                          range: -2...2, onChange: model.scheduleRender)
                         AdjustmentSlider(title: "Gradient Contrast",
                                          value: $model.adjustments.gradients[index].contrast,
-                                         range: -100...100, onChange: model.scheduleRender)
+                                         range: StudioAdjustmentRange.contrast, onChange: model.scheduleRender)
                         AdjustmentSlider(title: "Gradient Highlights",
                                          value: $model.adjustments.gradients[index].highlights,
-                                         range: -100...100, onChange: model.scheduleRender)
+                                         range: StudioAdjustmentRange.highlights, onChange: model.scheduleRender)
                         AdjustmentSlider(title: "Gradient Shadows",
                                          value: $model.adjustments.gradients[index].shadows,
-                                         range: -100...100, onChange: model.scheduleRender)
+                                         range: StudioAdjustmentRange.shadows, onChange: model.scheduleRender)
                         AdjustmentSlider(title: "Gradient Saturation",
                                          value: $model.adjustments.gradients[index].saturation,
-                                         range: -100...100, onChange: model.scheduleRender)
+                                         range: StudioAdjustmentRange.saturation, onChange: model.scheduleRender)
                     }
 
                     HStack {
@@ -1289,7 +1628,7 @@ struct ContentView: View {
                         }
                         Menu("Presets") {
                             ForEach(BuiltInPreset.allCases) { preset in
-                                Button(preset.rawValue) { model.applyPreset(preset) }
+                                Button(preset.displayName) { model.applyPreset(preset) }
                             }
                             Divider()
                             ForEach(CustomPresetStore.names, id: \.self) { name in
@@ -1319,7 +1658,7 @@ struct ContentView: View {
                                 .disabled(model.selectedPhotoIndices.isEmpty)
                                 Menu("Apply Preset to Selected (\(model.selectedPhotoIndices.count))") {
                                     ForEach(BuiltInPreset.allCases) { preset in
-                                        Button(preset.rawValue) {
+                                        Button(preset.displayName) {
                                             model.applyPresetToSelected(preset)
                                         }
                                     }
@@ -1330,7 +1669,7 @@ struct ContentView: View {
                                 }
                                 Divider()
                                 ForEach(BuiltInPreset.allCases) { preset in
-                                    Button("Apply \(preset.rawValue) to All") {
+                                    Button("Apply \(preset.displayName) to All") {
                                         model.applyPresetToAll(preset)
                                     }
                                 }
@@ -1524,17 +1863,7 @@ private struct ThumbnailView: View {
         .task(id: url) {
             isLoading = true
             let cgImage: CGImage? = await withTaskCancellationHandler(operation: {
-                await ThumbnailDecodeGate.shared.acquire()
-                guard !Task.isCancelled else {
-                    await ThumbnailDecodeGate.shared.release()
-                    return nil
-                }
-                let decodeTask = Task.detached(priority: .utility) {
-                    PhotoThumbnailLoader.shared.loadCGImage(url: url)
-                }
-                let result = await decodeTask.value
-                await ThumbnailDecodeGate.shared.release()
-                return result
+                await PhotoThumbnailLoader.shared.loadCGImageAsync(url: url)
             }, onCancel: {
                 Task { @MainActor in isLoading = false }
             })
@@ -1550,6 +1879,7 @@ final class PhotoThumbnailLoader {
 
     private let decoder: PhotoDecoder = ApplePhotoDecoder()
     private let renderer = ImageRenderer.shared
+    private let inFlight = ThumbnailDecodeCoordinator()
 
     func load(url: URL) -> NSImage? {
         guard let cgImage = loadCGImage(url: url) else { return nil }
@@ -1564,6 +1894,136 @@ final class PhotoThumbnailLoader {
         guard let image = renderer.makePreview(source, adjustments: ImageAdjustments(), maxDimension: 220) else { return nil }
         PhotoThumbnailCache.shared.store(image, for: url)
         return image
+    }
+
+    func loadCGImageAsync(url: URL) async -> CGImage? {
+        await inFlight.image(for: url) { [decoder, renderer] in
+            guard let source = try? decoder.decodePreview(url: url, maxDimension: 220),
+                  let image = renderer.makePreview(source, adjustments: ImageAdjustments(), maxDimension: 220)
+            else { return nil }
+            PhotoThumbnailCache.shared.store(image, for: url)
+            return image
+        }
+    }
+}
+
+/// Shares a thumbnail decode while multiple SwiftUI cells request the same
+/// file during list virtualization or rapid scrolling.
+actor ThumbnailDecodeCoordinator {
+    private struct Entry {
+        let id: UUID
+        let task: Task<CGImage?, Never>
+        var waiters: Int
+        var completed: Bool
+    }
+
+    private var tasks: [String: Entry] = [:]
+
+    func image(for url: URL, operation: @escaping @Sendable () -> CGImage?) async -> CGImage? {
+        let key = PhotoFileFingerprint.key(for: url)
+        let entry: Entry
+        if var existing = tasks[key] {
+            existing.waiters += 1
+            tasks[key] = existing
+            entry = existing
+        } else {
+            let taskID = UUID()
+            let task: Task<CGImage?, Never> = Task.detached(priority: .utility) {
+                guard await ThumbnailDecodeGate.shared.acquire() else { return nil }
+                defer {
+                    Task { await ThumbnailDecodeGate.shared.release() }
+                }
+                let signpostID = MorrowPerformanceLog.begin("Thumbnail decode")
+                defer { MorrowPerformanceLog.end("Thumbnail decode", id: signpostID) }
+                // ImageIO/Core Image may create autoreleased intermediates while
+                // decoding RAW previews. Release those per job so rapid filmstrip
+                // scrolling does not retain one batch of intermediates for the
+                // lifetime of the utility task.
+                return autoreleasepool(invoking: operation)
+            }
+            let created = Entry(id: taskID, task: task, waiters: 1, completed: false)
+            tasks[key] = created
+            entry = created
+            Task { [self] in
+                _ = await task.value
+                markCompleted(key: key, id: taskID)
+            }
+        }
+
+        let result = await awaitCancellable(entry.task)
+        releaseWaiter(key: key, id: entry.id)
+        return result
+    }
+
+    private func markCompleted(key: String, id: UUID) {
+        guard var entry = tasks[key], entry.id == id else { return }
+        entry.completed = true
+        if entry.waiters == 0 {
+            tasks[key] = nil
+        } else {
+            tasks[key] = entry
+        }
+    }
+
+    private func releaseWaiter(key: String, id: UUID) {
+        guard var entry = tasks[key], entry.id == id else { return }
+        entry.waiters = max(0, entry.waiters - 1)
+        if entry.waiters == 0 {
+            tasks[key] = nil
+            if !entry.completed {
+                entry.task.cancel()
+            }
+        } else {
+            tasks[key] = entry
+        }
+    }
+
+    private func awaitCancellable(_ task: Task<CGImage?, Never>) async -> CGImage? {
+        let waiter = ThumbnailResultWaiter()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                waiter.install(continuation)
+                if Task.isCancelled {
+                    waiter.resume(nil)
+                    return
+                }
+                Task {
+                    waiter.resume(await task.value)
+                }
+            }
+        }, onCancel: {
+            waiter.resume(nil)
+        })
+    }
+}
+
+private final class ThumbnailResultWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CGImage?, Never>?
+    private var completed = false
+
+    func install(_ continuation: CheckedContinuation<CGImage?, Never>) {
+        lock.lock()
+        if completed {
+            lock.unlock()
+            continuation.resume(returning: nil)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resume(_ result: CGImage?) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: result)
     }
 }
 

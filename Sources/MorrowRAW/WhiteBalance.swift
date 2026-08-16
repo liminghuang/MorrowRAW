@@ -2,6 +2,15 @@ import CoreImage
 import CoreGraphics
 
 enum WhiteBalanceSampler {
+    private static let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+
+    // CIContext construction is relatively expensive and the context is
+    // thread-safe. Reuse one for repeated eyedropper samples.
+    private static let context = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB) as Any,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any
+    ])
+
     static func sample(source: CIImage, normalizedPoint: CGPoint) -> (temperature: Double, tint: Double)? {
         let extent = source.extent
         guard !extent.isEmpty else { return nil }
@@ -13,7 +22,7 @@ enum WhiteBalanceSampler {
                           width: sampleSize, height: sampleSize)
             .intersection(extent)
         guard !rect.isEmpty,
-              let cgImage = CIContext().createCGImage(source.cropped(to: rect), from: rect),
+              let cgImage = context.createCGImage(source.cropped(to: rect), from: rect),
               let rgba = rgbaBytes(cgImage) else { return nil }
 
         let red = Double(rgba[0]) / 255
@@ -25,7 +34,7 @@ enum WhiteBalanceSampler {
     }
 
     private static func rgbaBytes(_ image: CGImage) -> [UInt8]? {
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+        guard let colorSpace = sRGBColorSpace,
               let context = CGContext(data: nil, width: 1, height: 1,
                                        bitsPerComponent: 8, bytesPerRow: 4,
                                        space: colorSpace,

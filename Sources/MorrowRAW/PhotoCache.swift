@@ -5,26 +5,49 @@ import UniformTypeIdentifiers
 
 actor ThumbnailDecodeGate {
     static let shared = ThumbnailDecodeGate(limit: 2)
+
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private let limit: Int
     private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [Waiter] = []
 
     init(limit: Int) { self.limit = limit }
 
-    func acquire() async {
+    func acquire() async -> Bool {
+        guard !Task.isCancelled else { return false }
         if active < limit {
             active += 1
-            return
+            return true
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
+
+        let id = UUID()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        }, onCancel: {
+            Task { await self.cancelWaiter(id: id) }
+        })
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
     }
 
     func release() {
-        if let next = waiters.first {
-            waiters.removeFirst()
-            next.resume()
+        if !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            waiter.continuation.resume(returning: true)
         } else {
             active = max(0, active - 1)
         }
@@ -32,12 +55,42 @@ actor ThumbnailDecodeGate {
 }
 
 enum PhotoFileFingerprint {
+    private final class Entry: NSObject {
+        let size: Int64
+        let modificationDate: Date?
+        let key: String
+
+        init(size: Int64, modificationDate: Date?, key: String) {
+            self.size = size
+            self.modificationDate = modificationDate
+            self.key = key
+        }
+    }
+
+    private static let cache: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 1024
+        return cache
+    }()
+
     static func key(for url: URL) -> String {
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        let stamp = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-        let size = values?.fileSize ?? 0
+        // Read fresh attributes instead of relying on URL resource-value
+        // snapshots, which can remain stale when a RAW sidecar is replaced
+        // in place during an editing session.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let modificationDate = attributes?[.modificationDate] as? Date
+        let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        let path = url.path as NSString
+        if let cached = cache.object(forKey: path),
+           cached.size == size, cached.modificationDate == modificationDate {
+            return cached.key
+        }
+
+        let stamp = modificationDate?.timeIntervalSince1970 ?? 0
         let input = "\(url.path)|\(size)|\(stamp)"
-        return SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
+        let key = SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
+        cache.setObject(Entry(size: size, modificationDate: modificationDate, key: key), forKey: path)
+        return key
     }
 }
 

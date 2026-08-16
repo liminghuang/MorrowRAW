@@ -13,7 +13,9 @@ final class MetalImageProcessor {
 
     private final class TexturePool {
         private let device: MTLDevice
+        private let maxCachedTextures = 16
         private var buckets: [String: [MTLTexture]] = [:]
+        private var cachedTextureCount = 0
         private let lock = NSLock()
 
         init(device: MTLDevice) {
@@ -25,6 +27,7 @@ final class MetalImageProcessor {
             lock.lock()
             if var bucket = buckets[key], let texture = bucket.popLast() {
                 buckets[key] = bucket
+                cachedTextureCount = max(0, cachedTextureCount - 1)
                 lock.unlock()
                 return texture
             }
@@ -41,9 +44,10 @@ final class MetalImageProcessor {
             let key = "\(texture.width)x\(texture.height)"
             lock.lock()
             var bucket = buckets[key, default: []]
-            if bucket.count < 8 {
+            if bucket.count < 8, cachedTextureCount < maxCachedTextures {
                 bucket.append(texture)
                 buckets[key] = bucket
+                cachedTextureCount += 1
             }
             lock.unlock()
         }
@@ -288,9 +292,15 @@ final class MetalImageProcessor {
         )
         descriptor.usage = [.shaderRead, .shaderWrite]
         guard let texturePool,
-              let input = texturePool.acquire(width: width, height: height),
-              let output = device.makeTexture(descriptor: descriptor),
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+              let input = texturePool.acquire(width: width, height: height) else { return nil }
+        guard let output = device.makeTexture(descriptor: descriptor) else {
+            texturePool.recycle(input)
+            return nil
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            texturePool.recycle(input)
+            return nil
+        }
         defer { texturePool.recycle(input) }
 
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
@@ -345,11 +355,22 @@ final class MetalImageProcessor {
             pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false
         )
         descriptor.usage = [.shaderRead, .shaderWrite]
-        guard let input = texturePool.acquire(width: width, height: height),
-              let output = device.makeTexture(descriptor: descriptor),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-            if let input = texturePool.acquire(width: width, height: height) { texturePool.recycle(input) }
+        guard let input = texturePool.acquire(width: width, height: height) else {
+            completion(nil)
+            return
+        }
+        guard let output = device.makeTexture(descriptor: descriptor) else {
+            texturePool.recycle(input)
+            completion(nil)
+            return
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            texturePool.recycle(input)
+            completion(nil)
+            return
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            texturePool.recycle(input)
             completion(nil)
             return
         }
@@ -410,11 +431,26 @@ final class MetalImageProcessor {
         )
         descriptor.usage = [.shaderRead, .shaderWrite]
         guard let texturePool,
-              let original = texturePool.acquire(width: width, height: height),
-              let ping = texturePool.acquire(width: width, height: height),
-              let pong = device.makeTexture(descriptor: descriptor),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+              let original = texturePool.acquire(width: width, height: height) else { return nil }
+        guard let ping = texturePool.acquire(width: width, height: height) else {
+            texturePool.recycle(original)
+            return nil
+        }
+        guard let pong = device.makeTexture(descriptor: descriptor) else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
+            return nil
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
+            return nil
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
+            return nil
+        }
 
         context.render(image, to: original, commandBuffer: commandBuffer,
                        bounds: extent, colorSpace: colorSpace)
@@ -492,11 +528,30 @@ final class MetalImageProcessor {
             pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false
         )
         descriptor.usage = [.shaderRead, .shaderWrite]
-        guard let original = texturePool.acquire(width: width, height: height),
-              let ping = texturePool.acquire(width: width, height: height),
-              let pong = device.makeTexture(descriptor: descriptor),
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+        guard let original = texturePool.acquire(width: width, height: height) else {
+            completion(nil)
+            return
+        }
+        guard let ping = texturePool.acquire(width: width, height: height) else {
+            texturePool.recycle(original)
+            completion(nil)
+            return
+        }
+        guard let pong = device.makeTexture(descriptor: descriptor) else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
+            completion(nil)
+            return
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
+            completion(nil)
+            return
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            texturePool.recycle(original)
+            texturePool.recycle(ping)
             completion(nil)
             return
         }

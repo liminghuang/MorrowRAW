@@ -7,8 +7,11 @@ enum PhotoDecoderError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedFormat: return "不支援的影像格式"
-        case .cannotDecode(let url): return "無法解碼影像：\(url.lastPathComponent)"
+        case .unsupportedFormat:
+            return StudioText.localized("不支援的影像格式", "Unsupported image format")
+        case .cannotDecode(let url):
+            return StudioText.localized("無法解碼影像：\(url.lastPathComponent)",
+                                       "Unable to decode image: \(url.lastPathComponent)")
         }
     }
 }
@@ -28,6 +31,10 @@ final class ApplePhotoDecoder: PhotoDecoder {
     private static let decodedCache: NSCache<NSString, CIImage> = {
         let cache = NSCache<NSString, CIImage>()
         cache.countLimit = 8
+        // A CIImage can represent a very large RAW. Bound the cache by an
+        // estimated RGBA footprint as well as entry count so browsing a
+        // high-resolution folder cannot retain several gigabytes of sources.
+        cache.totalCostLimit = 512 * 1024 * 1024
         return cache
     }()
     private static let rawExtensions: Set<String> = [
@@ -61,8 +68,14 @@ final class ApplePhotoDecoder: PhotoDecoder {
             decoded = nil
         }
         guard let decoded else { throw PhotoDecoderError.cannotDecode(url) }
-        Self.decodedCache.setObject(decoded, forKey: cacheKey)
+        Self.decodedCache.setObject(decoded, forKey: cacheKey, cost: Self.estimatedCost(of: decoded))
         return decoded
+    }
+
+    private static func estimatedCost(of image: CIImage) -> Int {
+        let pixelCount = max(1, image.extent.width * image.extent.height)
+        let bytes = min(Double(Int.max), pixelCount * 4)
+        return max(1, Int(bytes))
     }
 
     func decodePreview(url: URL, maxDimension: CGFloat) throws -> CIImage {

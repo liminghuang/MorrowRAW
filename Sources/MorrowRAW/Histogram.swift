@@ -3,25 +3,33 @@ import Accelerate
 import SwiftUI
 
 enum HistogramCalculator {
+    private static let analysisMaxDimension = 512
+
     static func snapshot(for image: CGImage, count: Int = 64) -> HistogramSnapshot {
         let signpostID = MorrowPerformanceLog.begin("Histogram")
         defer { MorrowPerformanceLog.end("Histogram", id: signpostID) }
         guard count > 1,
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(data: nil, width: image.width, height: image.height,
-                                      bitsPerComponent: 8, bytesPerRow: image.width * 4,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return HistogramSnapshot(luminance: [], rgb: .empty)
+        }
+        let scale = min(1, CGFloat(analysisMaxDimension) / CGFloat(max(image.width, image.height)))
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
                                       space: colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
               let data = context.data else {
             return HistogramSnapshot(luminance: [], rgb: .empty)
         }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         let bytes = data.assumingMemoryBound(to: UInt8.self)
         var luminance = [CGFloat](repeating: 0, count: count)
         var red = luminance
         var green = luminance
         var blue = luminance
-        let pixelCount = image.width * image.height
+        let pixelCount = width * height
         for index in 0..<pixelCount {
             let offset = index * 4
             let redValue = CGFloat(bytes[offset]) / 255

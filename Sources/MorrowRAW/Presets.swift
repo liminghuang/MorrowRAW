@@ -10,6 +10,17 @@ enum BuiltInPreset: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var displayName: String {
+        switch self {
+        case .defaultPreset: return StudioText.localized("預設時設定", "Default")
+        case .landscape: return StudioText.localized("風景", "Landscape")
+        case .portrait: return StudioText.localized("人像", "Portrait")
+        case .vivid: return StudioText.localized("鮮豔", "Vivid")
+        case .monochrome: return StudioText.localized("黑白", "Monochrome")
+        case .soft: return StudioText.localized("柔和", "Soft")
+        }
+    }
+
     func apply(to adjustments: inout ImageAdjustments) {
         if self == .defaultPreset {
             adjustments = ImageAdjustments()

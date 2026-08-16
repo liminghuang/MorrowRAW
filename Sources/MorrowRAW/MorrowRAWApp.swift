@@ -37,13 +37,13 @@ struct MorrowRAWApp: App {
             ContentView()
         }
         .defaultSize(width: 1200, height: 800)
-        Window("關於 Morrow RAW", id: "about") {
+        Window(StudioText.localized("關於 Morrow RAW", "About Morrow RAW"), id: "about") {
             AboutView()
         }
         .defaultSize(width: 430, height: 390)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("關於 Morrow RAW") {
+                Button(StudioText.localized("關於 Morrow RAW", "About Morrow RAW")) {
                     openWindow(id: "about")
                 }
             }

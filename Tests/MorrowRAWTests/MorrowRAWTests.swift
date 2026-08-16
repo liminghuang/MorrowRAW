@@ -8,6 +8,7 @@ private final class LockedScanResults: @unchecked Sendable {
     private let lock = NSLock()
     private var storedTotal = -1
     private var storedBatches: [[String]] = []
+    private var storedScanned: [Int] = []
 
     func setTotal(_ total: Int) {
         lock.lock()
@@ -18,6 +19,12 @@ private final class LockedScanResults: @unchecked Sendable {
     func appendBatch(_ batch: [String]) {
         lock.lock()
         storedBatches.append(batch)
+        lock.unlock()
+    }
+
+    func appendScanProgress(_ scanned: Int) {
+        lock.lock()
+        storedScanned.append(scanned)
         lock.unlock()
     }
 
@@ -32,9 +39,49 @@ private final class LockedScanResults: @unchecked Sendable {
         defer { lock.unlock() }
         return storedBatches
     }
+
+    var scanned: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedScanned
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
 
 final class CompatibilityTests: XCTestCase {
+    func testAdjustmentSliderRangesFavorFineControlWithoutChangingPersistedDomain() {
+        XCTAssertEqual(StudioAdjustmentRange.contrast, -50...50)
+        XCTAssertEqual(StudioAdjustmentRange.highlights, -75...75)
+        XCTAssertEqual(StudioAdjustmentRange.shadows, -75...75)
+        XCTAssertEqual(StudioAdjustmentRange.whites, -50...50)
+        XCTAssertEqual(StudioAdjustmentRange.blacks, -50...50)
+        XCTAssertEqual(StudioAdjustmentRange.vibrance, -50...50)
+        XCTAssertEqual(StudioAdjustmentRange.saturation, -100...100)
+        XCTAssertEqual(StudioAdjustmentRange.sharpening, 0...100)
+
+        var adjustments = ImageAdjustments()
+        adjustments.contrast = 100
+        adjustments.vibrance = -100
+        XCTAssertEqual(adjustments.contrast, 100)
+        XCTAssertEqual(adjustments.vibrance, -100)
+    }
+
     func testDisplayDateUsesCalendarDateWithSlashSeparators() {
         XCTAssertEqual(PhotoMetadataReader.displayDate("2026:08:16 13:45:20"), "2026/08/16 13:45:20")
         XCTAssertEqual(PhotoMetadataReader.displayDate("2026-08-16"), "2026/08/16")
@@ -53,6 +100,92 @@ final class CompatibilityTests: XCTestCase {
         model.zoomScale = 0.25
         model.zoomOut()
         XCTAssertEqual(model.zoomScale, 0.25, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testSliderInteractionCreatesOneUndoStepForManyValues() {
+        let model = EditorViewModel()
+        model.beginInteractiveAdjustment()
+        model.adjustments.exposure = 0.5
+        model.scheduleRender(recordHistory: false)
+        model.adjustments.exposure = 1.0
+        model.scheduleRender(recordHistory: false)
+        model.finishInteractiveAdjustment()
+
+        XCTAssertTrue(model.canUndo)
+        model.undo()
+        XCTAssertEqual(model.adjustments.exposure, 0, accuracy: 0.0001)
+        XCTAssertFalse(model.canUndo)
+    }
+
+    @MainActor
+    func testArrowNavigationSelectsAdjacentPhotoWithoutLeavingBounds() {
+        let model = EditorViewModel()
+        model.photos = [
+            URL(fileURLWithPath: "/tmp/one.arw"),
+            URL(fileURLWithPath: "/tmp/two.arw"),
+            URL(fileURLWithPath: "/tmp/three.arw")
+        ]
+        model.selectedIndex = 1
+
+        model.movePhotoSelection(.left)
+        XCTAssertEqual(model.selectedIndex, 0)
+        model.movePhotoSelection(.left)
+        XCTAssertEqual(model.selectedIndex, 0)
+        model.movePhotoSelection(.right)
+        XCTAssertEqual(model.selectedIndex, 1)
+        model.movePhotoSelection(.right)
+        XCTAssertEqual(model.selectedIndex, 2)
+        model.movePhotoSelection(.right)
+        XCTAssertEqual(model.selectedIndex, 2)
+    }
+
+    func testNearbyThumbnailIndicesPreferAdjacentPhotosAndExcludeCurrent() {
+        XCTAssertEqual(
+            EditorViewModel.nearbyThumbnailIndices(around: 2, count: 6, radius: 2),
+            [3, 1, 4, 0]
+        )
+        XCTAssertEqual(
+            EditorViewModel.nearbyThumbnailIndices(around: 0, count: 3, radius: 3),
+            [1, 2]
+        )
+        XCTAssertEqual(EditorViewModel.nearbyThumbnailIndices(around: 0, count: 0), [])
+    }
+
+    @MainActor
+    func testOpeningPhotoLoadsSidecarBeforeBackgroundDecodeCompletes() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-load-state-(UUID().uuidString)")
+        let photo = root.appendingPathComponent("sample.png")
+        let cache = root.appendingPathComponent("RAW_TEMP")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeTestPNG(to: photo, color: CIColor(red: 0.3, green: 0.4, blue: 0.5))
+
+        var saved = ImageAdjustments()
+        saved.exposure = 1.5
+        saved.contrast = -24
+        try saved.save(to: cache.appendingPathComponent("sample.png.rawpipe.xml"))
+
+        let model = EditorViewModel()
+        model.openDropped(url: photo)
+
+        XCTAssertEqual(model.adjustments.exposure, 1.5)
+        XCTAssertEqual(model.adjustments.contrast, -24)
+    }
+
+    func testFolderScanReconcilesSelectionByURLInsteadOfResettingToFirstPhoto() {
+        let first = URL(fileURLWithPath: "/tmp/first.arw")
+        let selected = URL(fileURLWithPath: "/tmp/selected.arw")
+        let third = URL(fileURLWithPath: "/tmp/third.arw")
+        let result = EditorViewModel.reconciledSelection(
+            preferredURL: selected,
+            selectedURLs: [first, selected],
+            in: [third, selected, first]
+        )
+
+        XCTAssertEqual(result.index, 1)
+        XCTAssertEqual(result.selected, [1, 2])
     }
 
     func testReadsExistingAdjustmentXMLScalarFields() throws {
@@ -171,6 +304,28 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(histogram.red.max(), 1)
         XCTAssertNotEqual(histogram.red, histogram.green)
         XCTAssertNotEqual(histogram.red, histogram.blue)
+    }
+
+    func testHistogramDownsamplesLargeImagesBeforeAnalysis() {
+        guard let context = CGContext(data: nil, width: 2048, height: 1024,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            XCTFail("Could not create large histogram source")
+            return
+        }
+        context.setFillColor(CGColor(colorSpace: colorSpace, components: [0.2, 0.6, 0.9, 1])!)
+        context.fill(CGRect(x: 0, y: 0, width: 2048, height: 1024))
+        guard let image = context.makeImage() else {
+            XCTFail("Could not create large histogram image")
+            return
+        }
+
+        let snapshot = HistogramCalculator.snapshot(for: image)
+        XCTAssertEqual(snapshot.luminance.count, 64)
+        XCTAssertEqual(snapshot.rgb.red.count, 64)
+        XCTAssertEqual(snapshot.luminance.max(), 1)
     }
 
     func testHistogramSnapshotMatchesIndividualCalculators() {
@@ -295,6 +450,26 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(result.writtenURLs.map(\.lastPathComponent), ["0001_edited.png", "0002_edited.png"])
     }
 
+    func testBatchExporterReservesAppendNumberNamesBeforeParallelWorkersStart() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("away-photo-name-reservation-\(UUID().uuidString)")
+        let firstFolder = root.appendingPathComponent("first")
+        let secondFolder = root.appendingPathComponent("second")
+        let output = root.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: firstFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let first = firstFolder.appendingPathComponent("same.png")
+        let second = secondFolder.appendingPathComponent("same.png")
+        try writeTestPNG(to: first, color: CIColor(red: 0.8, green: 0.1, blue: 0.1))
+        try writeTestPNG(to: second, color: CIColor(red: 0.1, green: 0.1, blue: 0.8))
+
+        let result = try ImageBatchExporter().export(urls: [first, second], to: output, format: .png)
+        XCTAssertTrue(result.failures.isEmpty)
+        XCTAssertEqual(result.writtenURLs.map(\.lastPathComponent), ["same_edited.png", "same_edited_2.png"])
+    }
+
     func testBatchExporterHonoursCancellationBeforeStartingNextPhoto() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("away-photo-cancel-\(UUID().uuidString)")
@@ -382,6 +557,29 @@ final class CompatibilityTests: XCTestCase {
     }
 
     @MainActor
+    func testInteractiveLocalToolDragCreatesOneUndoStep() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-interactive-history-\(UUID().uuidString)")
+        let photo = root.appendingPathComponent("sample.png")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeTestPNG(to: photo, color: CIColor(red: 0.3, green: 0.4, blue: 0.5))
+
+        let model = EditorViewModel()
+        model.open(url: photo)
+        model.addGradient()
+        model.moveGradientCenter(at: 0, to: CGPoint(x: 0.6, y: 0.6))
+        model.moveGradientCenter(at: 0, to: CGPoint(x: 0.7, y: 0.7))
+        model.moveGradientCenter(at: 0, to: CGPoint(x: 0.8, y: 0.8))
+        model.finishInteractiveAdjustment()
+
+        model.undo()
+        XCTAssertEqual(model.adjustments.gradients.first?.centerX, 0.5)
+        XCTAssertEqual(model.adjustments.gradients.first?.centerY, 0.15)
+        XCTAssertTrue(model.canUndo)
+    }
+
+    @MainActor
     func testOriginalPreviewNeutralizesEditsButKeepsGeometry() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("away-photo-original-preview-\(UUID().uuidString)")
@@ -442,10 +640,12 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(EditorViewModel().language, .english)
         XCTAssertEqual(StudioText.filmstrip, "Filmstrip")
         XCTAssertEqual(StudioText.loadingPhotos(2, 5), "Loading photos… 2/5")
+        XCTAssertEqual(BuiltInPreset.landscape.displayName, "Landscape")
 
         defaults.set(AppLanguage.traditionalChinese.rawValue, forKey: key)
         XCTAssertEqual(StudioText.filmstrip, "膠卷")
         XCTAssertEqual(StudioText.loadingPhotos(2, 5), "正在讀取照片… 2/5")
+        XCTAssertEqual(BuiltInPreset.landscape.displayName, "風景")
     }
 
     @MainActor
@@ -477,7 +677,7 @@ final class CompatibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testSelectedBatchEditCopiesOnlyCheckedPhotos() throws {
+    func testSelectedBatchEditCopiesOnlyCheckedPhotos() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("away-photo-selected-batch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -494,6 +694,9 @@ final class CompatibilityTests: XCTestCase {
         model.adjustments.exposure = 1.5
         model.selectedPhotoIndices = [1]
         model.copyCurrentAdjustmentsToSelected()
+        while model.isBatchAdjusting {
+            try await Task.sleep(for: .milliseconds(1))
+        }
 
         var selected = ImageAdjustments()
         try selected.load(from: root.appendingPathComponent("RAW_TEMP/second.png.rawpipe.xml"))
@@ -503,7 +706,7 @@ final class CompatibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testSelectedBatchEditCanApplyPresetOnlyToCheckedPhotos() throws {
+    func testSelectedBatchEditCanApplyPresetOnlyToCheckedPhotos() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("away-photo-selected-preset-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -517,6 +720,9 @@ final class CompatibilityTests: XCTestCase {
         model.openSynchronously(urls: [first, second])
         model.selectedPhotoIndices = [1]
         model.applyPresetToSelected(.vivid)
+        while model.isBatchAdjusting {
+            try await Task.sleep(for: .milliseconds(1))
+        }
 
         var restored = ImageAdjustments()
         try restored.load(from: root.appendingPathComponent("RAW_TEMP/second.png.rawpipe.xml"))
@@ -680,9 +886,11 @@ final class CompatibilityTests: XCTestCase {
         let callbacks = LockedScanResults()
         let result = PhotoLibrary.scanIncrementally(folder: folder, rawOnly: true, batchSize: 2,
                                                     onTotal: { callbacks.setTotal($0) },
+                                                    onScanProgress: { scanned, _ in callbacks.appendScanProgress(scanned) },
                                                     onBatch: { callbacks.appendBatch($0.map(\.lastPathComponent)) })
 
         XCTAssertEqual(callbacks.total, 3)
+        XCTAssertEqual(callbacks.scanned, [0, 4])
         XCTAssertEqual(callbacks.batches.map(\.count), [2, 1])
         XCTAssertEqual(callbacks.batches.flatMap { $0 }, ["IMG1.ARW", "IMG2.ARW", "IMG10.ARW"])
         XCTAssertEqual(result.map(\.lastPathComponent), ["IMG1.ARW", "IMG2.ARW", "IMG10.ARW"])
@@ -862,6 +1070,19 @@ final class CompatibilityTests: XCTestCase {
         suite.set([folder.path, "/path/that/does/not/exist"], forKey: "MorrowRAW.recentFolders")
 
         XCTAssertEqual(RecentFoldersStore.load(defaults: suite), [folder.standardizedFileURL.path])
+    }
+
+    func testPhotoFingerprintChangesWhenFileSizeChanges() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-fingerprint-(UUID().uuidString).arw")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try Data([0x01]).write(to: file)
+        let original = PhotoFileFingerprint.key(for: file)
+        try Data([0x01, 0x02]).write(to: file)
+        let changed = PhotoFileFingerprint.key(for: file)
+
+        XCTAssertNotEqual(original, changed)
     }
 
     @MainActor
@@ -1100,6 +1321,108 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotNil(preview)
         XCTAssertEqual(preview?.width, 40)
         XCTAssertEqual(preview?.height, 30)
+    }
+
+    func testAsyncMetalPreviewReusesScratchTexturesAcrossRepeatedRenders() async {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.8))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        var adjustments = ImageAdjustments()
+        adjustments.noiseReduction = 70
+        adjustments.saturation = 24
+        adjustments.distortion = 12
+
+        for _ in 0..<12 {
+            let preview = await ImageRenderer.shared.makePreviewAsync(
+                source, adjustments: adjustments, maxDimension: 256, quality: .interactive
+            )
+            XCTAssertNotNil(preview)
+        }
+    }
+
+    func testThumbnailDecodeGateCancelsQueuedWaiterWithoutLeakingPermit() async {
+        let gate = ThumbnailDecodeGate(limit: 1)
+        let initiallyAcquired = await gate.acquire()
+        XCTAssertTrue(initiallyAcquired)
+
+        let waiting = Task { await gate.acquire() }
+        await Task.yield()
+        waiting.cancel()
+        let waiterAcquired = await waiting.value
+        XCTAssertFalse(waiterAcquired)
+
+        await gate.release()
+        let reacquired = await gate.acquire()
+        XCTAssertTrue(reacquired)
+        await gate.release()
+    }
+
+    func testProgressUpdateGateAlwaysPublishesFirstAndFinalUpdates() {
+        let gate = ProgressUpdateGate(minimumInterval: 60)
+        XCTAssertTrue(gate.shouldPublish(completed: 1, total: 10))
+        XCTAssertFalse(gate.shouldPublish(completed: 2, total: 10))
+        XCTAssertTrue(gate.shouldPublish(completed: 10, total: 10))
+    }
+
+    func testThumbnailDecodeCoordinatorSharesConcurrentRequests() async {
+        let coordinator = ThumbnailDecodeCoordinator()
+        let counter = LockedCounter()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-thumbnail-coordinator.raw")
+
+        let first = Task {
+            await coordinator.image(for: url) {
+                counter.increment()
+                usleep(50_000)
+                return nil
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(5))
+        let second = Task {
+            await coordinator.image(for: url) {
+                counter.increment()
+                return nil
+            }
+        }
+
+        _ = await first.value
+        _ = await second.value
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    func testThumbnailDecodeCoordinatorCancelsCallerWithoutWaitingForDecode() async {
+        let coordinator = ThumbnailDecodeCoordinator()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-thumbnail-cancel.raw")
+        let request = Task {
+            await coordinator.image(for: url) {
+                usleep(200_000)
+                return nil
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(5))
+        let start = Date()
+        request.cancel()
+        let result = await request.value
+
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.15)
+    }
+
+    func testPreviewRenderGateCancelsQueuedRenderWithoutReleasingActivePermit() async {
+        let gate = PreviewRenderGate()
+        let initiallyAcquired = await gate.acquire()
+        XCTAssertTrue(initiallyAcquired)
+
+        let waiting = Task { await gate.acquire() }
+        await Task.yield()
+        waiting.cancel()
+        let waiterAcquired = await waiting.value
+        XCTAssertFalse(waiterAcquired)
+
+        await gate.release()
+        let reacquired = await gate.acquire()
+        XCTAssertTrue(reacquired)
+        await gate.release()
     }
 
     func testMetalRepairPerformanceAndMemoryBudget() {

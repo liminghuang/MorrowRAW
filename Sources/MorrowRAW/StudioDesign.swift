@@ -68,15 +68,20 @@ enum StudioText {
     static var addCustomPreset: String { t("新增自訂預設", "Add Custom Preset") }
     static var presetName: String { t("預設名稱", "Preset Name") }
     static var exporting: String { t("正在匯出", "Exporting") }
+    static var applyingAdjustments: String { t("正在套用批次調整", "Applying batch adjustments") }
     static var readingPhotos: String { t("正在讀取照片", "Loading photos") }
     static var foundPhotos: String { t("已找到", "Found") }
     static var decodingRAW: String { t("正在解碼 RAW", "Decoding RAW") }
     static var openPhotoToEdit: String { t("開啟照片開始編輯", "Open a photo to start editing") }
     static var photoInfo: String { t("照片資訊", "Photo Info") }
+    static var notSelected: String { t("尚未選擇照片", "No photo selected") }
+    static var noDisplayablePhotos: String { t("沒有可顯示的照片", "No displayable photos") }
     static var filmstrip: String { t("膠卷", "Filmstrip") }
     static var zoomIn: String { t("放大", "Zoom In") }
     static var zoomOut: String { t("縮小", "Zoom Out") }
     static var selected: String { t("選取", "Select") }
+    static var selectAll: String { t("全選", "Select All") }
+    static var clearSelection: String { t("清除選取", "Clear Selection") }
     static var batch: String { t("批次", "Batch") }
     static var allPhotos: String { t("全部照片…", "All Photos…") }
     static var folder: String { t("資料夾", "Folder") }
@@ -88,6 +93,10 @@ enum StudioText {
 
     static func loadingPhotos(_ loaded: Int, _ total: Int) -> String {
         total > 0 ? "\(readingPhotos)… \(loaded)/\(total)" : "\(readingPhotos)… \(foundPhotos) \(loaded)"
+    }
+
+    static func scanningFolder(_ scanned: Int, _ total: Int) -> String {
+        english ? "Scanning folder… \(scanned)/\(total)" : "正在掃描資料夾… \(scanned)/\(total)"
     }
 
     static func decoding(_ name: String) -> String { "\(decodingRAW)：\(name)" }
@@ -133,6 +142,7 @@ struct StudioAdjustmentSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let onChange: () -> Void
+    var onEditingChanged: (Bool) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -143,10 +153,32 @@ struct StudioAdjustmentSlider: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(StudioUI.secondary)
             }
-            Slider(value: $value, in: range) { _ in onChange() }
+            Slider(value: $value, in: range) { editing in
+                onEditingChanged(editing)
+                onChange()
+            }
                 .tint(StudioUI.accent)
         }
     }
+}
+
+/// Comfortable day-to-day ranges for global and local photo adjustments.
+///
+/// The persisted ImageAdjustments values intentionally keep their wider
+/// compatibility domain. These ranges only control direct slider interaction,
+/// so older sidecars and presets can still be loaded without being rewritten.
+enum StudioAdjustmentRange {
+    static let contrast = -50.0...50.0
+    static let highlights = -75.0...75.0
+    static let shadows = -75.0...75.0
+    static let whites = -50.0...50.0
+    static let blacks = -50.0...50.0
+    static let tint = -100.0...100.0
+    static let vibrance = -50.0...50.0
+    static let saturation = -100.0...100.0
+    static let sharpening = 0.0...100.0
+    static let vignette = -100.0...100.0
+    static let distortion = -100.0...100.0
 }
 
 struct StudioThumbnail: View {
@@ -172,21 +204,15 @@ struct StudioThumbnail: View {
         .frame(width: size.width, height: size.height)
         .clipped()
         .background(StudioUI.raised)
+        .accessibilityLabel(url.lastPathComponent)
+        .accessibilityValue(isLoading ? StudioText.localized("載入中", "Loading") :
+                            (failed ? StudioText.localized("縮圖載入失敗", "Thumbnail unavailable") :
+                                StudioText.localized("已載入", "Loaded")))
         .task(id: url) {
             isLoading = true
             failed = false
             let cgImage: CGImage? = await withTaskCancellationHandler(operation: {
-                await ThumbnailDecodeGate.shared.acquire()
-                guard !Task.isCancelled else {
-                    await ThumbnailDecodeGate.shared.release()
-                    return nil
-                }
-                let decodeTask = Task.detached(priority: .utility) {
-                    PhotoThumbnailLoader.shared.loadCGImage(url: url)
-                }
-                let result = await decodeTask.value
-                await ThumbnailDecodeGate.shared.release()
-                return result
+                await PhotoThumbnailLoader.shared.loadCGImageAsync(url: url)
             }, onCancel: {
                 Task { @MainActor in isLoading = false }
             })

@@ -46,8 +46,14 @@ struct StudioWorkspace: View {
         .foregroundStyle(StudioUI.primary)
         .environment(\.locale, model.language.locale)
         .overlay(alignment: .top) {
-            if model.isExporting {
+            if model.isSingleExporting {
+                SingleExportProgressView()
+                    .padding(.top, 58)
+            } else if model.isExporting {
                 BatchExportProgressView(model: model)
+                    .padding(.top, 58)
+            } else if model.isBatchAdjusting {
+                BatchAdjustmentProgressView(model: model)
                     .padding(.top, 58)
             }
         }
@@ -64,6 +70,21 @@ struct StudioWorkspace: View {
     }
 }
 
+private struct SingleExportProgressView: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(StudioText.exporting)
+                .font(.caption)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.78), in: Capsule())
+        .foregroundStyle(.white)
+        .shadow(radius: 5)
+    }
+}
+
 private struct BatchExportProgressView: View {
     @ObservedObject var model: EditorViewModel
 
@@ -75,6 +96,27 @@ private struct BatchExportProgressView: View {
             Text(StudioText.exporting(model.exportCompletedCount, model.exportTotalCount))
                 .font(.caption.monospacedDigit())
             Button(StudioText.cancel) { model.cancelBatchExport() }
+                .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.78), in: Capsule())
+        .foregroundStyle(.white)
+        .shadow(radius: 5)
+    }
+}
+
+private struct BatchAdjustmentProgressView: View {
+    @ObservedObject var model: EditorViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView(value: Double(model.batchAdjustmentCompleted),
+                         total: Double(max(1, model.batchAdjustmentTotal)))
+                .frame(width: 150)
+            Text("\(StudioText.applyingAdjustments) \(model.batchAdjustmentCompleted)/\(model.batchAdjustmentTotal)")
+                .font(.caption.monospacedDigit())
+            Button(StudioText.cancel) { model.cancelBatchAdjustment() }
                 .buttonStyle(.bordered)
         }
         .padding(.horizontal, 12)
@@ -106,7 +148,7 @@ private struct StudioToolbar: View {
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             Button(StudioText.reset) { model.resetAllAdjustments() }
             Menu { exportMenu } label: { Label(StudioText.export, systemImage: "square.and.arrow.up") }
-            .disabled(model.preview == nil || model.isExporting)
+            .disabled(model.preview == nil || model.isExporting || model.isSingleExporting || model.isBatchAdjusting)
         }
         .buttonStyle(.bordered)
         .padding(.horizontal, 14).frame(height: 52)
@@ -168,6 +210,9 @@ private struct StudioCanvas: View {
     @State private var hoveredSourceIndex: Int?
     @State private var draggingGradientIndex: Int?
     @State private var hoveredGradientIndex: Int?
+    @State private var magnificationStart: CGFloat?
+    @State private var panOffset: CGSize = .zero
+    @State private var panStartOffset: CGSize?
     var body: some View {
         ZStack {
             Color.black.opacity(0.38)
@@ -177,20 +222,48 @@ private struct StudioCanvas: View {
                 BeforeAfterPreview(edited: preview, original: original,
                                    position: Binding(get: { model.beforeAfterPosition },
                                                      set: { model.setBeforeAfterPosition($0) }),
-                                   zoomScale: model.zoomScale)
+                                   zoomScale: model.zoomScale,
+                                   panOffset: $panOffset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(28)
             } else if let preview = model.preview {
-                Image(nsImage: preview).resizable().aspectRatio(contentMode: .fit).scaleEffect(model.zoomScale).padding(28)
+                Image(nsImage: preview).resizable().aspectRatio(contentMode: .fit)
+                    .scaleEffect(model.zoomScale)
+                    .offset(panOffset)
+                    .padding(28)
             } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
             VStack {
                 if model.isLoadingFolder {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(StudioText.loadingPhotos(model.folderLoadCount, model.folderTotalCount))
+                    HStack(spacing: 10) {
+                        if model.folderTotalCount > 0 {
+                            let progress = min(1, max(0, Double(model.folderLoadCount) / Double(model.folderTotalCount)))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(StudioText.loadingPhotos(model.folderLoadCount, model.folderTotalCount))
+                                ProgressView(value: progress)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 150)
+                            }
+                        } else if model.folderScanEntryCount > 0 {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(StudioText.scanningFolder(model.folderScannedCount,
+                                                               model.folderScanEntryCount))
+                                ProgressView(value: Double(model.folderScannedCount),
+                                             total: Double(model.folderScanEntryCount))
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 150)
+                            }
+                        } else {
+                            ProgressView().controlSize(.small)
+                            Text(StudioText.loadingPhotos(model.folderLoadCount, model.folderTotalCount))
+                        }
                         Button(StudioText.cancel) { model.cancelFolderLoading() }
                     }
                     .font(.caption)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(StudioText.localized("資料夾讀取進度", "Folder loading progress"))
+                    .accessibilityValue(model.folderTotalCount > 0
+                                        ? "\(model.folderLoadCount)/\(model.folderTotalCount)"
+                                        : "\(model.folderScannedCount)/\(model.folderScanEntryCount)")
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(.black.opacity(0.72), in: Capsule())
                     .padding(14)
@@ -198,18 +271,32 @@ private struct StudioCanvas: View {
                 if model.isLoadingPhoto {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(StudioText.decoding(model.sourceName))
+                        Text(model.isPhotoPreviewReady
+                             ? StudioText.localized("預覽已載入，正在解碼原圖：\(model.sourceName)",
+                                                    "Preview loaded; decoding original: \(model.sourceName)")
+                             : StudioText.decoding(model.sourceName))
                     }
                     .font(.caption)
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(.black.opacity(0.72), in: Capsule())
                     .padding(.horizontal, 14)
                 }
-                if localTool != .none {
+                if model.whiteBalancePickerEnabled {
+                    HStack {
+                        Label(StudioText.localized("白平衡取樣：請點擊照片", "White balance sampling: click the photo"),
+                              systemImage: "eyedropper")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.black.opacity(0.72), in: Capsule())
+                        Spacer()
+                    }.padding(14)
+                } else if localTool != .none {
                     HStack {
                         Label(localTool == .heal
-                              ? (pendingHealTarget == nil ? "仿製修補：第 1 步，點擊要移除的電線" : "仿製修補：第 2 步，點擊乾淨天空作為來源")
-                              : "漸層工具：紫色虛線是作用方向與範圍，請調整右側滑桿",
+                              ? (pendingHealTarget == nil
+                                 ? StudioText.localized("仿製修補：第 1 步，點擊要移除的電線", "Clone heal: Step 1, click the wire to remove")
+                                 : StudioText.localized("仿製修補：第 2 步，點擊乾淨天空作為來源", "Clone heal: Step 2, click clean sky as the source"))
+                              : StudioText.localized("漸層工具：紫色虛線是作用方向與範圍，請調整右側滑桿", "Gradient tool: the purple dashed line shows direction and range; adjust the sliders on the right"),
                               systemImage: localTool == .heal ? "paintbrush.pointed" : "line.diagonal")
                             .font(.caption.weight(.medium))
                             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -241,7 +328,11 @@ private struct StudioCanvas: View {
                                  pointerLocation: pointerLocation,
                                  pendingHealTarget: pendingHealTarget,
                                  hoveredSourceIndex: hoveredSourceIndex,
-                                 hoveredGradientIndex: hoveredGradientIndex)
+                                 hoveredGradientIndex: hoveredGradientIndex,
+                                 zoomScale: model.zoomScale,
+                                 panOffset: panOffset)
+                    .scaleEffect(model.zoomScale)
+                    .offset(panOffset)
             }
             Color.clear
             .contentShape(Rectangle())
@@ -250,8 +341,7 @@ private struct StudioCanvas: View {
                 switch phase {
                 case .active(let location):
                     pointerLocation = location
-                    let point = CGPoint(x: location.x / geometry.size.width,
-                                        y: 1 - location.y / geometry.size.height)
+                    let point = normalizedPoint(from: location, in: geometry.size)
                     hoveredSourceIndex = model.healSpotIndexNearSource(point)
                     hoveredGradientIndex = model.gradientIndexNearCenter(point)
                 case .ended:
@@ -260,20 +350,24 @@ private struct StudioCanvas: View {
                     hoveredGradientIndex = nil
                 }
             }
+            .onAppear { model.updatePreviewViewport(geometry.size) }
+            .onChange(of: geometry.size) { newSize in
+                model.updatePreviewViewport(newSize)
+            }
             .simultaneousGesture(TapGesture(count: 2).onEnded {
                 guard model.preview == nil else { return }
                 model.openPhoto()
             })
             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                 pointerLocation = value.location
-                let point = CGPoint(x: value.location.x / geometry.size.width,
-                                    y: 1 - value.location.y / geometry.size.height)
+                let point = normalizedPoint(from: value.location, in: geometry.size)
                 if localTool == .heal, model.healingBrushEnabled {
                     if let draggingSourceIndex {
                         model.moveHealSource(at: draggingSourceIndex, to: point)
                         return
                     }
                     if let sourceIndex = model.healSpotIndexNearSource(point) {
+                        model.beginInteractiveAdjustment()
                         draggingSourceIndex = sourceIndex
                         hoveredSourceIndex = sourceIndex
                         return
@@ -285,24 +379,45 @@ private struct StudioCanvas: View {
                         return
                     }
                     if let gradientIndex = model.gradientIndexNearCenter(point) {
+                        model.beginInteractiveAdjustment()
                         draggingGradientIndex = gradientIndex
                         hoveredGradientIndex = gradientIndex
                         return
                     }
                 }
+                if localTool == .none,
+                   !model.healingBrushEnabled,
+                   !model.whiteBalancePickerEnabled,
+                   model.zoomScale > 1 {
+                    if panStartOffset == nil { panStartOffset = panOffset }
+                    let start = panStartOffset ?? panOffset
+                    panOffset = clampedPanOffset(
+                        CGSize(width: start.width + value.translation.width,
+                               height: start.height + value.translation.height),
+                        in: geometry.size,
+                        zoomScale: model.zoomScale
+                    )
+                    return
+                }
             }.onEnded { value in
+                if panStartOffset != nil {
+                    panStartOffset = nil
+                    return
+                }
                 if draggingSourceIndex != nil {
                     draggingSourceIndex = nil
+                    model.finishInteractiveAdjustment()
                     return
                 }
                 if draggingGradientIndex != nil {
                     draggingGradientIndex = nil
+                    model.finishInteractiveAdjustment()
                     return
                 }
-                guard localTool == .heal, model.healingBrushEnabled else { return }
+                guard model.whiteBalancePickerEnabled ||
+                        (localTool == .heal && model.healingBrushEnabled) else { return }
                 // SwiftUI uses a top-left origin while Core Image uses a bottom-left origin.
-                let point = CGPoint(x: value.location.x / geometry.size.width,
-                                    y: 1 - value.location.y / geometry.size.height)
+                let point = normalizedPoint(from: value.location, in: geometry.size)
                 if model.whiteBalancePickerEnabled { model.pickWhiteBalance(at: point) }
                 else if let target = pendingHealTarget {
                     model.addHealSpot(target: target, source: point)
@@ -310,17 +425,30 @@ private struct StudioCanvas: View {
                 } else {
                     pendingHealTarget = point
                 }
-            }).simultaneousGesture(MagnificationGesture().onChanged { value in
-                guard !model.healingBrushEnabled else { return }; model.zoomScale = min(4, max(0.25, value))
-            })
+            }).simultaneousGesture(MagnificationGesture()
+                .onChanged { value in
+                    guard !model.healingBrushEnabled else { return }
+                    if magnificationStart == nil { magnificationStart = model.zoomScale }
+                    let start = magnificationStart ?? model.zoomScale
+                    model.zoomScale = min(4, max(0.25, start * value))
+                }
+                .onEnded { _ in magnificationStart = nil }
+            )
         }}
         .overlay(alignment: .bottom) {
             HStack(spacing: 8) {
-                Button("−") { model.zoomOut() }.help(StudioText.zoomOut)
-                Button(StudioText.fit) { model.resetZoom() }
+                Button("−") { model.zoomOut() }
+                    .help(StudioText.zoomOut)
+                    .accessibilityLabel(StudioText.zoomOut)
+                Button(StudioText.fit) {
+                    model.resetZoom()
+                    panOffset = .zero
+                }
                 Text("\(Int(model.zoomScale * 100))%")
                     .monospacedDigit().frame(width: 48)
-                Button("+") { model.zoomIn() }.help(StudioText.zoomIn)
+                Button("+") { model.zoomIn() }
+                    .help(StudioText.zoomIn)
+                    .accessibilityLabel(StudioText.zoomIn)
                 Button(model.showOriginal ? StudioText.edited : StudioText.original) {
                     model.toggleShowOriginal()
                 }
@@ -335,6 +463,32 @@ private struct StudioCanvas: View {
             .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
             .padding(8)
         }
+        .onChange(of: model.selectedIndex) { _ in
+            panOffset = .zero
+            panStartOffset = nil
+        }
+        .onChange(of: model.zoomScale) { scale in
+            if scale <= 1 {
+                panOffset = .zero
+            } else {
+                panStartOffset = nil
+            }
+        }
+    }
+
+    private func clampedPanOffset(_ offset: CGSize, in canvasSize: CGSize, zoomScale: CGFloat) -> CGSize {
+        let limitX = max(0, canvasSize.width * (zoomScale - 1) * 0.5)
+        let limitY = max(0, canvasSize.height * (zoomScale - 1) * 0.5)
+        return CGSize(width: min(limitX, max(-limitX, offset.width)),
+                      height: min(limitY, max(-limitY, offset.height)))
+    }
+
+    private func normalizedPoint(from screenPoint: CGPoint, in canvasSize: CGSize) -> CGPoint {
+        let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+        let logicalX = (screenPoint.x - center.x - panOffset.width) / max(0.001, model.zoomScale) + center.x
+        let logicalY = (screenPoint.y - center.y - panOffset.height) / max(0.001, model.zoomScale) + center.y
+        return CGPoint(x: logicalX / max(1, canvasSize.width),
+                       y: 1 - logicalY / max(1, canvasSize.height))
     }
 }
 
@@ -343,27 +497,36 @@ private struct BeforeAfterPreview: NSViewRepresentable {
     let original: NSImage
     @Binding var position: CGFloat
     let zoomScale: CGFloat
+    @Binding var panOffset: CGSize
 
     func makeNSView(context: Context) -> ComparisonView {
         let view = ComparisonView()
         view.update(edited: edited, original: original, position: position,
-                    zoomScale: zoomScale, onPositionChanged: context.coordinator.onPositionChanged)
+                    zoomScale: zoomScale, panOffset: panOffset,
+                    onPositionChanged: context.coordinator.onPositionChanged,
+                    onPanChanged: context.coordinator.onPanChanged)
         return view
     }
 
     func updateNSView(_ nsView: ComparisonView, context: Context) {
         nsView.update(edited: edited, original: original, position: position,
-                      zoomScale: zoomScale, onPositionChanged: context.coordinator.onPositionChanged)
+                      zoomScale: zoomScale, panOffset: panOffset,
+                      onPositionChanged: context.coordinator.onPositionChanged,
+                      onPanChanged: context.coordinator.onPanChanged)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator { value in position = value }
+        Coordinator(onPositionChanged: { value in position = value },
+                    onPanChanged: { value in panOffset = value })
     }
 
     final class Coordinator {
         let onPositionChanged: (CGFloat) -> Void
-        init(onPositionChanged: @escaping (CGFloat) -> Void) {
+        let onPanChanged: (CGSize) -> Void
+        init(onPositionChanged: @escaping (CGFloat) -> Void,
+             onPanChanged: @escaping (CGSize) -> Void) {
             self.onPositionChanged = onPositionChanged
+            self.onPanChanged = onPanChanged
         }
     }
 
@@ -372,27 +535,59 @@ private struct BeforeAfterPreview: NSViewRepresentable {
         private var originalImage: NSImage?
         private var position: CGFloat = 0.5
         private var zoomScale: CGFloat = 1
+        private var panOffset: CGSize = .zero
         var onPositionChanged: ((CGFloat) -> Void)?
+        var onPanChanged: ((CGSize) -> Void)?
+        private var draggingDivider = false
+        private var panStart: NSPoint?
+        private var panStartOffset: CGSize = .zero
 
         override var isOpaque: Bool { true }
         override var acceptsFirstResponder: Bool { true }
 
         func update(edited: NSImage, original: NSImage, position: CGFloat,
-                    zoomScale: CGFloat, onPositionChanged: @escaping (CGFloat) -> Void) {
+                    zoomScale: CGFloat, panOffset: CGSize,
+                    onPositionChanged: @escaping (CGFloat) -> Void,
+                    onPanChanged: @escaping (CGSize) -> Void) {
             editedImage = edited
             originalImage = original
             self.position = min(1, max(0, position))
             self.zoomScale = zoomScale
+            self.panOffset = panOffset
             self.onPositionChanged = onPositionChanged
+            self.onPanChanged = onPanChanged
             needsDisplay = true
         }
 
         override func mouseDown(with event: NSEvent) {
-            updatePosition(with: event)
+            let point = convert(event.locationInWindow, from: nil)
+            let splitX = bounds.minX + bounds.width * position
+            if abs(point.x - splitX) <= 24 {
+                draggingDivider = true
+                updatePosition(with: event)
+            } else if zoomScale > 1 {
+                draggingDivider = false
+                panStart = point
+                panStartOffset = panOffset
+            }
         }
 
         override func mouseDragged(with event: NSEvent) {
-            updatePosition(with: event)
+            if draggingDivider {
+                updatePosition(with: event)
+            } else if let panStart {
+                let point = convert(event.locationInWindow, from: nil)
+                let proposed = CGSize(width: panStartOffset.width + point.x - panStart.x,
+                                      height: panStartOffset.height + point.y - panStart.y)
+                panOffset = clampedPanOffset(proposed)
+                onPanChanged?(panOffset)
+                needsDisplay = true
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            draggingDivider = false
+            panStart = nil
         }
 
         private func updatePosition(with event: NSEvent) {
@@ -411,8 +606,8 @@ private struct BeforeAfterPreview: NSViewRepresentable {
             let scale = min(bounds.width / max(1, imageSize.width),
                             bounds.height / max(1, imageSize.height)) * zoomScale
             let drawSize = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
-            let imageRect = NSRect(x: bounds.midX - drawSize.width / 2,
-                                   y: bounds.midY - drawSize.height / 2,
+            let imageRect = NSRect(x: bounds.midX - drawSize.width / 2 + panOffset.width,
+                                   y: bounds.midY - drawSize.height / 2 + panOffset.height,
                                    width: drawSize.width, height: drawSize.height)
 
             editedImage.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1)
@@ -440,6 +635,13 @@ private struct BeforeAfterPreview: NSViewRepresentable {
             after.draw(at: NSPoint(x: bounds.maxX - after.size(withAttributes: attributes).width - 12,
                                    y: bounds.maxY - 24), withAttributes: attributes)
         }
+
+        private func clampedPanOffset(_ offset: CGSize) -> CGSize {
+            let limitX = max(0, bounds.width * (zoomScale - 1) * 0.5)
+            let limitY = max(0, bounds.height * (zoomScale - 1) * 0.5)
+            return CGSize(width: min(limitX, max(-limitX, offset.width)),
+                          height: min(limitY, max(-limitY, offset.height)))
+        }
     }
 }
 
@@ -458,7 +660,7 @@ private struct StudioInspector: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $activeTab) { Text(StudioText.adjustments).tag(0); Text(StudioText.presets).tag(1); Text(StudioText.export).tag(2); Text(StudioText.info).tag(3) }.pickerStyle(.segmented).padding(12)
+            Picker(StudioText.localized("檢查器分頁", "Inspector Tabs"), selection: $activeTab) { Text(StudioText.adjustments).tag(0); Text(StudioText.presets).tag(1); Text(StudioText.export).tag(2); Text(StudioText.info).tag(3) }.pickerStyle(.segmented).padding(12)
             ScrollView {
                 if activeTab == 0 { adjustmentTab }
                 else if activeTab == 1 { presetTab }
@@ -481,100 +683,117 @@ private struct StudioInspector: View {
             slider(StudioText.localized("銳利度", "Sharpening"), $model.adjustments.sharpening, -100...100); slider(StudioText.localized("降噪", "Noise Reduction"), $model.adjustments.noiseReduction, 0...100); slider(StudioText.localized("暗角", "Vignette"), $model.adjustments.vignette, -100...100); slider(StudioText.localized("鏡頭變形", "Lens Distortion"), $model.adjustments.distortion, -100...100)
         }
         StudioSection(title: StudioText.geometry, systemImage: "crop", isExpanded: $geometryOpen) {
-            Picker("比例", selection: $model.adjustments.cropAspectRatio) { Text("原始").tag("Original"); Text("3:2").tag("3:2"); Text("4:3").tag("4:3"); Text("16:9").tag("16:9"); Text("1:1").tag("1:1") }.onChange(of: model.adjustments.cropAspectRatio) { _ in model.scheduleRender() }
-            HStack { TextField("自訂比例", text: $model.customCropRatio); Button("套用") { model.applyCustomCropRatio() } }
-            slider("水平位置", $model.adjustments.cropX, 0...0.9); slider("垂直位置", $model.adjustments.cropY, 0...0.9); slider("寬度", $model.adjustments.cropWidth, 0.1...1); slider("高度", $model.adjustments.cropHeight, 0.1...1); slider("角度", $model.adjustments.cropAngle, -45...45)
-            HStack { Button("左轉") { model.rotateLeft() }; Button("右轉") { model.rotateRight() }; Button("重設裁切") { model.resetCrop() } }
+            Picker(StudioText.localized("比例", "Aspect Ratio"), selection: $model.adjustments.cropAspectRatio) { Text(StudioText.localized("原始", "Original")).tag("Original"); Text("3:2").tag("3:2"); Text("4:3").tag("4:3"); Text("16:9").tag("16:9"); Text("1:1").tag("1:1") }.onChange(of: model.adjustments.cropAspectRatio) { _ in model.scheduleRender() }
+            HStack { TextField(StudioText.localized("自訂比例", "Custom Ratio"), text: $model.customCropRatio); Button(StudioText.localized("套用", "Apply")) { model.applyCustomCropRatio() } }
+            slider(StudioText.localized("水平位置", "Horizontal Position"), $model.adjustments.cropX, 0...0.9); slider(StudioText.localized("垂直位置", "Vertical Position"), $model.adjustments.cropY, 0...0.9); slider(StudioText.localized("寬度", "Width"), $model.adjustments.cropWidth, 0.1...1); slider(StudioText.localized("高度", "Height"), $model.adjustments.cropHeight, 0.1...1); slider(StudioText.localized("角度", "Angle"), $model.adjustments.cropAngle, -45...45)
+            HStack { Button(StudioText.localized("左轉", "Rotate Left")) { model.rotateLeft() }; Button(StudioText.localized("右轉", "Rotate Right")) { model.rotateRight() }; Button(StudioText.localized("重設裁切", "Reset Crop")) { model.resetCrop() } }
         }
-        StudioSection(title: "漸層工具", systemImage: "line.diagonal", isExpanded: $gradientOpen) {
-            Text("漸層是獨立的局部調整工具，沿紫色方向逐步影響照片。")
+        StudioSection(title: StudioText.localized("漸層工具", "Gradient Tool"), systemImage: "line.diagonal", isExpanded: $gradientOpen) {
+            Text(StudioText.localized("漸層是獨立的局部調整工具，沿紫色方向逐步影響照片。", "The gradient is an independent local adjustment. Its purple direction shows the gradual effect across the photo."))
                 .font(.caption).foregroundStyle(StudioUI.secondary)
             HStack {
-                Button("新增漸層") {
+                Button(StudioText.localized("新增漸層", "Add Gradient")) {
                     if model.healingBrushEnabled { model.toggleHealingBrush() }
                     pendingHealTarget = nil
                     model.addGradient()
                     localTool = .gradient
                 }.buttonStyle(.borderedProminent)
-                Button("結束漸層") { localTool = .none }
+                Button(StudioText.localized("結束漸層", "Finish Gradient")) { localTool = .none }
                     .disabled(localTool != .gradient)
                 Button("−") { model.removeLastGradient() }
                     .disabled(model.adjustments.gradients.isEmpty)
             }
-            Text("拖曳照片上的 G1 中心可移動範圍；紫色半透明區是羽化遮罩，顏色越深代表影響越強。")
+            Text(StudioText.localized("拖曳照片上的 G1 中心可移動範圍；紫色半透明區是羽化遮罩，顏色越深代表影響越強。", "Drag the G1 center to move the range. The purple dashed line shows direction; stronger color means a stronger effect."))
                 .font(.caption2).foregroundStyle(StudioUI.secondary)
             if !model.adjustments.gradients.isEmpty {
                 let index = model.adjustments.gradients.count - 1
-                Text("目前編輯：G\(index + 1)").font(.caption.weight(.semibold))
-                slider("漸層曝光", $model.adjustments.gradients[index].exposure, -2...2)
-                slider("漸層對比", $model.adjustments.gradients[index].contrast, -100...100)
-                slider("漸層亮部", $model.adjustments.gradients[index].highlights, -100...100)
-                slider("漸層暗部", $model.adjustments.gradients[index].shadows, -100...100)
-                slider("漸層飽和度", $model.adjustments.gradients[index].saturation, -100...100)
-                slider("漸層角度", $model.adjustments.gradients[index].angle, -180...180)
-                slider("漸層羽化寬度", $model.adjustments.gradients[index].range, 0.02...0.4)
+                Text(StudioText.localized("目前編輯：G\(index + 1)", "Editing: G\(index + 1)")).font(.caption.weight(.semibold))
+                slider(StudioText.localized("漸層曝光", "Gradient Exposure"), $model.adjustments.gradients[index].exposure, -2...2)
+                slider(StudioText.localized("漸層對比", "Gradient Contrast"), $model.adjustments.gradients[index].contrast, StudioAdjustmentRange.contrast)
+                slider(StudioText.localized("漸層亮部", "Gradient Highlights"), $model.adjustments.gradients[index].highlights, StudioAdjustmentRange.highlights)
+                slider(StudioText.localized("漸層暗部", "Gradient Shadows"), $model.adjustments.gradients[index].shadows, StudioAdjustmentRange.shadows)
+                slider(StudioText.localized("漸層飽和度", "Gradient Saturation"), $model.adjustments.gradients[index].saturation, StudioAdjustmentRange.saturation)
+                slider(StudioText.localized("漸層角度", "Gradient Angle"), $model.adjustments.gradients[index].angle, -180...180)
+                slider(StudioText.localized("漸層羽化寬度", "Gradient Feather"), $model.adjustments.gradients[index].range, 0.02...0.4)
             }
         }
-        StudioSection(title: "修補工具", systemImage: "paintbrush.pointed", isExpanded: $healOpen) {
-            Text("修補需要兩次點擊：先點要修復的目標（T），再點乾淨來源（S）。")
+        StudioSection(title: StudioText.localized("修補工具", "Heal Tool"), systemImage: "paintbrush.pointed", isExpanded: $healOpen) {
+            Text(StudioText.localized("修補需要兩次點擊：先點要修復的目標（T），再點乾淨來源（S）。", "Healing uses two clicks: click the target to repair (T), then click a clean source (S)."))
                 .font(.caption).foregroundStyle(StudioUI.secondary)
             HStack {
                 Button {
                     if model.healingBrushEnabled { model.toggleHealingBrush(); localTool = .none; pendingHealTarget = nil }
                     else { localTool = .heal; model.toggleHealingBrush() }
                 } label: {
-                    Label(model.healingBrushEnabled ? "結束修補" : "自動修補", systemImage: "paintbrush.pointed")
+                    Label(model.healingBrushEnabled ? StudioText.localized("結束修補", "Finish Healing") : StudioText.localized("自動修補", "Auto Heal"), systemImage: "paintbrush.pointed")
                 }.buttonStyle(.borderedProminent)
-                Button("取消工具") { if model.healingBrushEnabled { model.toggleHealingBrush() }; localTool = .none; pendingHealTarget = nil }
+                Button(StudioText.localized("取消工具", "Cancel Tool")) { if model.healingBrushEnabled { model.toggleHealingBrush() }; localTool = .none; pendingHealTarget = nil }
                     .disabled(localTool == .none)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("使用方式").font(.caption.weight(.semibold))
-                Text("• 白色虛線圓圈：目前筆刷大小，只是游標。")
-                Text("• 第一次點電線：設定目標位置（T）。")
-                Text("• 第二次點乾淨天空：設定來源位置（S），才會建立修補點。")
-                Text("• T 與 S 的連線：表示天空會複製到電線。")
+                Text(StudioText.localized("使用方式", "How to use")).font(.caption.weight(.semibold))
+                Text(StudioText.localized("• 白色虛線圓圈：目前筆刷大小，只是游標。", "• White dashed circle: current brush size and cursor only."))
+                Text(StudioText.localized("• 第一次點電線：設定目標位置（T）。", "• First click on the wire: set the target (T)."))
+                Text(StudioText.localized("• 第二次點乾淨天空：設定來源位置（S），才會建立修補點。", "• Second click on clean sky: set the source (S) and create the heal spot."))
+                Text(StudioText.localized("• T 與 S 的連線：表示天空會複製到電線。", "• The T–S line shows the source copied onto the target."))
             }.font(.caption2).foregroundStyle(StudioUI.secondary)
-            StudioAdjustmentSlider(title: "筆刷大小", value: $model.adjustments.healSize,
-                                   range: 4...80, onChange: model.scheduleRender)
+            StudioAdjustmentSlider(title: StudioText.localized("筆刷大小", "Brush Size"), value: $model.adjustments.healSize,
+                                   range: 4...80,
+                                   onChange: { model.scheduleRender(recordHistory: false) },
+                                   onEditingChanged: { editing in
+                                       if editing { model.beginInteractiveAdjustment() }
+                                       else { model.finishInteractiveAdjustment() }
+                                   })
             HStack {
-                Label("修補點 \(model.adjustments.healSpots.count)", systemImage: "circle.dotted")
+                Label(StudioText.localized("修補點 \(model.adjustments.healSpots.count)", "Heal Spots \(model.adjustments.healSpots.count)"), systemImage: "circle.dotted")
                 Spacer()
-                Button("新增仿製點") { model.addHealSpot(inpaint: false); localTool = .heal; pendingHealTarget = nil }
-                Button("移除最後") { model.removeLastHealSpot() }.disabled(model.adjustments.healSpots.isEmpty)
-                Button("清除全部") { model.clearHealSpots() }.disabled(model.adjustments.healSpots.isEmpty)
+                Button(StudioText.localized("新增仿製點", "Add Clone Spot")) { model.addHealSpot(inpaint: false); localTool = .heal; pendingHealTarget = nil }
+                Button(StudioText.localized("移除最後", "Remove Last")) { model.removeLastHealSpot() }.disabled(model.adjustments.healSpots.isEmpty)
+                Button(StudioText.localized("清除全部", "Clear All")) { model.clearHealSpots() }.disabled(model.adjustments.healSpots.isEmpty)
             }
             if !model.adjustments.healSpots.isEmpty {
                 let index = model.adjustments.healSpots.count - 1
-                StudioAdjustmentSlider(title: "目前修補強度", value: Binding(
+                StudioAdjustmentSlider(title: StudioText.localized("目前修補強度", "Current Heal Strength"), value: Binding(
                     get: { model.adjustments.healSpots[index].strength * 100 },
                     set: { model.adjustments.healSpots[index].strength = min(1, max(0, $0 / 100)) }
-                ), range: 0...100, onChange: model.scheduleRender)
-                Text("100% 完全套用來源；降低百分比可讓修補與原照片自然混合。")
+                ), range: 0...100,
+                onChange: { model.scheduleRender(recordHistory: false) },
+                onEditingChanged: { editing in
+                    if editing { model.beginInteractiveAdjustment() }
+                    else { model.finishInteractiveAdjustment() }
+                })
+                Text(StudioText.localized("100% 完全套用來源；降低百分比可讓修補與原照片自然混合。", "100% fully applies the source; lower values blend the repair with the original."))
                     .font(.caption2).foregroundStyle(StudioUI.secondary)
             }
         }
         StudioSection(title: StudioText.versions, systemImage: "square.on.square", isExpanded: $versionsOpen) {
-            HStack { Text("虛擬副本 \(model.virtualCopyIndex + 1)/\(max(1, model.virtualCopyCount))"); Spacer(); Button("←") { model.switchVirtualCopy(by: -1) }; Button("新增") { model.createVirtualCopy() }; Button("→") { model.switchVirtualCopy(by: 1) } }
+            HStack { Text(StudioText.localized("虛擬副本 \(model.virtualCopyIndex + 1)/\(max(1, model.virtualCopyCount))", "Virtual Copy \(model.virtualCopyIndex + 1)/\(max(1, model.virtualCopyCount))")); Spacer(); Button("←") { model.switchVirtualCopy(by: -1) }; Button(StudioText.localized("新增", "New")) { model.createVirtualCopy() }; Button("→") { model.switchVirtualCopy(by: 1) } }
         }
     }
 
-    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View { StudioAdjustmentSlider(title: title, value: value, range: range, onChange: model.scheduleRender) }
+    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {
+        StudioAdjustmentSlider(title: title, value: value, range: range,
+                               onChange: { model.scheduleRender(recordHistory: false) },
+                               onEditingChanged: { editing in
+                                   if editing { model.beginInteractiveAdjustment() }
+                                   else { model.finishInteractiveAdjustment() }
+                               })
+    }
 
     @ViewBuilder private var presetTab: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("內建預設").font(.headline)
-            ForEach(BuiltInPreset.allCases) { preset in Button(preset.rawValue) { model.applyPreset(preset) }.frame(maxWidth: .infinity, alignment: .leading) }
-            Divider(); Text("自訂預設").font(.headline)
+            Text(StudioText.localized("內建預設", "Built-in Presets")).font(.headline)
+            ForEach(BuiltInPreset.allCases) { preset in Button(preset.displayName) { model.applyPreset(preset) }.frame(maxWidth: .infinity, alignment: .leading) }
+            Divider(); Text(StudioText.localized("自訂預設", "Custom Presets")).font(.headline)
             ForEach(CustomPresetStore.names, id: \.self) { name in Button(name) { model.applyCustomPreset(name) }.frame(maxWidth: .infinity, alignment: .leading) }
-            Button("新增自訂預設…") { model.beginNewCustomPreset() }
-            Button("匯入／匯出預設…") { model.exportCustomPresets() }
+            Button(StudioText.localized("新增自訂預設…", "New Custom Preset…")) { model.beginNewCustomPreset() }
+            Button(StudioText.localized("匯入／匯出預設…", "Import/Export Presets…")) { model.exportCustomPresets() }
         }.padding(14).buttonStyle(.plain)
     }
 
     @ViewBuilder private var exportTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Toggle("浮水印", isOn: $model.watermark.enabled)
+            Toggle(StudioText.localized("浮水印", "Watermark"), isOn: $model.watermark.enabled)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(StudioText.jpegQuality)
@@ -588,10 +807,10 @@ private struct StudioInspector: View {
                        in: 10...100, step: 1)
                     .tint(StudioUI.accent)
             }
-            Picker("長邊上限", selection: $model.exportMaxLongEdge) { Text("原尺寸").tag(0); Text("1200 px").tag(1200); Text("2400 px").tag(2400); Text("4000 px").tag(4000); Text("6000 px").tag(6000) }
+            Picker(StudioText.localized("長邊上限", "Long Edge Limit"), selection: $model.exportMaxLongEdge) { Text(StudioText.localized("原尺寸", "Original Size")).tag(0); Text("1200 px").tag(1200); Text("2400 px").tag(2400); Text("4000 px").tag(4000); Text("6000 px").tag(6000) }
             Picker("DPI", selection: $model.exportDPI) { Text("72").tag(CGFloat(72)); Text("150").tag(CGFloat(150)); Text("300").tag(CGFloat(300)); Text("600").tag(CGFloat(600)) }
-            Toggle("保留 EXIF", isOn: $model.preserveMetadata)
-            Picker("介面外觀", selection: $model.appearance) { ForEach(AppAppearance.allCases) { Text($0.rawValue == "System" ? "系統" : ($0.rawValue == "Dark" ? "深色" : "淺色")).tag($0) } }
+            Toggle(StudioText.localized("保留 EXIF", "Preserve EXIF"), isOn: $model.preserveMetadata)
+            Picker(StudioText.localized("介面外觀", "Appearance"), selection: $model.appearance) { ForEach(AppAppearance.allCases) { Text($0.rawValue == "System" ? StudioText.localized("系統", "System") : ($0.rawValue == "Dark" ? StudioText.localized("深色", "Dark") : StudioText.localized("淺色", "Light"))).tag($0) } }
             Picker(StudioText.language, selection: $model.language) {
                 ForEach(AppLanguage.allCases) { Text($0.displayName).tag($0) }
             }
@@ -604,7 +823,7 @@ private struct StudioInspector: View {
             if let exif = model.adjustments.cachedExif {
                 PhotoMetadataSummary(exif: exif)
             } else {
-                Text("尚無照片資訊")
+                Text(StudioText.localized("尚無照片資訊", "No photo information"))
             }
         }.font(.callout).foregroundStyle(StudioUI.secondary).padding(14)
     }
@@ -615,6 +834,21 @@ private struct PhotoMetadataSummary: View {
 
     private var camera: String {
         [exif.cameraMake, exif.cameraModel].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    private func localizedMetadataValue(_ value: String) -> String {
+        switch value {
+        case "自動": return StudioText.localized("自動", "Auto")
+        case "手動": return StudioText.localized("手動", "Manual")
+        case "平均": return StudioText.localized("平均", "Average")
+        case "中央重點": return StudioText.localized("中央重點", "Center-weighted")
+        case "點測光": return StudioText.localized("點測光", "Spot")
+        case "多點測光": return StudioText.localized("多點測光", "Multi-segment")
+        case "矩陣／多區": return StudioText.localized("矩陣／多區", "Matrix/Multi-area")
+        case "局部": return StudioText.localized("局部", "Partial")
+        case "其他": return StudioText.localized("其他", "Other")
+        default: return value
+        }
     }
 
     @ViewBuilder
@@ -628,22 +862,22 @@ private struct PhotoMetadataSummary: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            row("相機", camera, "camera")
-            row("鏡頭", exif.lens, "camera.aperture")
-            row("拍攝時間", PhotoMetadataReader.displayDate(exif.dateTaken), "calendar")
-            row("焦距", exif.focalLength, "ruler")
-            row("光圈", exif.aperture, "circle.dotted")
-            row("快門", exif.shutter, "timer")
-            row("感光度", exif.iso.isEmpty ? "" : "ISO \(exif.iso)", "sun.max")
-            row("曝光補償", exif.exposureBias, "plusminus")
-            row("對焦模式", exif.focusMode, "scope")
-            row("白平衡", exif.whiteBalance, "thermometer.sun")
-            row("測光模式", exif.meteringMode, "camera.aperture")
+            row(StudioText.localized("相機", "Camera"), camera, "camera")
+            row(StudioText.localized("鏡頭", "Lens"), exif.lens, "camera.aperture")
+            row(StudioText.localized("拍攝時間", "Date Taken"), PhotoMetadataReader.displayDate(exif.dateTaken), "calendar")
+            row(StudioText.localized("焦距", "Focal Length"), exif.focalLength, "ruler")
+            row(StudioText.localized("光圈", "Aperture"), exif.aperture, "circle.dotted")
+            row(StudioText.localized("快門", "Shutter"), exif.shutter, "timer")
+            row(StudioText.localized("感光度", "ISO"), exif.iso.isEmpty ? "" : "ISO \(exif.iso)", "sun.max")
+            row(StudioText.localized("曝光補償", "Exposure Bias"), exif.exposureBias, "plusminus")
+            row(StudioText.localized("對焦模式", "Focus Mode"), exif.focusMode, "scope")
+            row(StudioText.localized("白平衡", "White Balance"), localizedMetadataValue(exif.whiteBalance), "thermometer.sun")
+            row(StudioText.localized("測光模式", "Metering Mode"), localizedMetadataValue(exif.meteringMode), "camera.aperture")
             if exif.fileSize > 0 {
-                row("檔案大小", String(format: "%.2f MB", Double(exif.fileSize) / 1_048_576), "doc")
+                row(StudioText.localized("檔案大小", "File Size"), String(format: "%.2f MB", Double(exif.fileSize) / 1_048_576), "doc")
             }
             if exif.width > 0 && exif.height > 0 {
-                Label("尺寸：\(exif.width) × \(exif.height) px", systemImage: "aspectratio")
+                Label(StudioText.localized("尺寸：\(exif.width) × \(exif.height) px", "Dimensions: \(exif.width) × \(exif.height) px"), systemImage: "aspectratio")
             }
         }
     }
@@ -656,6 +890,8 @@ private struct LocalToolMarkers: View {
     let pendingHealTarget: CGPoint?
     let hoveredSourceIndex: Int?
     let hoveredGradientIndex: Int?
+    let zoomScale: CGFloat
+    let panOffset: CGSize
 
     var body: some View {
         GeometryReader { geometry in
@@ -701,9 +937,15 @@ private struct LocalToolMarkers: View {
                         .position(point)
                 }
                 if localTool == .heal, model.healingBrushEnabled, let pointerLocation {
+                    let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    let logicalPoint = CGPoint(
+                        x: (pointerLocation.x - center.x - panOffset.width) / max(0.001, zoomScale) + center.x,
+                        y: (pointerLocation.y - center.y - panOffset.height) / max(0.001, zoomScale) + center.y
+                    )
                     Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
-                        .frame(width: max(24, model.adjustments.healSize * 2), height: max(24, model.adjustments.healSize * 2))
-                        .position(pointerLocation)
+                        .frame(width: max(24, model.adjustments.healSize * 2) / max(0.001, zoomScale),
+                               height: max(24, model.adjustments.healSize * 2) / max(0.001, zoomScale))
+                        .position(logicalPoint)
                         .shadow(color: .black, radius: 2)
                 }
             }
@@ -761,11 +1003,47 @@ private struct StudioFilmstrip: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(spacing: 5) { Text(StudioText.filmstrip).font(.caption).foregroundStyle(StudioUI.secondary); Text(StudioText.photoCount(model.photos.count)).font(.caption2) }.frame(width: 60)
-            ScrollView(.horizontal) { LazyHStack(spacing: 8) { ForEach(Array(model.photos.enumerated()), id: \.element) { index, url in
-                VStack(spacing: 3) { Button { model.selectPhoto(at: index) } label: { StudioThumbnail(url: url, size: CGSize(width: 132, height: 80)) }.buttonStyle(.plain); Text(url.lastPathComponent).font(.caption2).lineLimit(1).frame(width: 132); Toggle(StudioText.selected, isOn: Binding(get: { model.selectedPhotoIndices.contains(index) }, set: { model.setPhotoSelection(at: index, selected: $0) })).toggleStyle(.checkbox).font(.caption2) }
-                    .padding(5).background(index == model.selectedIndex ? StudioUI.accent.opacity(0.28) : StudioUI.raised).clipShape(RoundedRectangle(cornerRadius: 5))
-            } }.padding(.vertical, 8) }
-            if model.photos.count > 1 { Menu(StudioText.batch) { Button(StudioText.copy + "（" + StudioText.selected + "）") { model.copyCurrentAdjustmentsToSelected() }; Button(StudioText.copy + "（" + StudioText.allPhotos.replacingOccurrences(of: "…", with: "") + "）") { model.copyCurrentAdjustmentsToAll() }; Divider(); ForEach(BuiltInPreset.allCases) { p in Button("\(p.rawValue) → " + StudioText.allPhotos.replacingOccurrences(of: "…", with: "")) { model.applyPresetToAll(p) } } } }
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) { LazyHStack(spacing: 8) { ForEach(Array(model.photos.enumerated()), id: \.element) { index, url in
+                    VStack(spacing: 3) { Button { model.selectPhoto(at: index) } label: { StudioThumbnail(url: url, size: CGSize(width: 132, height: 80)) }.buttonStyle(.plain).accessibilityLabel(url.lastPathComponent).accessibilityValue(index == model.selectedIndex ? StudioText.localized("目前照片", "Current photo") : StudioText.localized("照片", "Photo")); Text(url.lastPathComponent).font(.caption2).lineLimit(1).frame(width: 132); Toggle(StudioText.selected, isOn: Binding(get: { model.selectedPhotoIndices.contains(index) }, set: { model.setPhotoSelection(at: index, selected: $0) })).toggleStyle(.checkbox).font(.caption2) }
+                        .padding(5).background(index == model.selectedIndex ? StudioUI.accent.opacity(0.28) : StudioUI.raised).clipShape(RoundedRectangle(cornerRadius: 5))
+                        .id(index)
+                } } }.padding(.vertical, 8)
+                    .onChange(of: model.selectedIndex) { index in
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(index, anchor: .center)
+                        }
+                    }
+            }
+            if model.photos.count > 1 {
+                Menu {
+                    Section("\(StudioText.selected)（\(model.selectedPhotoIndices.count)）") {
+                        Button(StudioText.selectAll) { model.selectAllPhotos() }
+                        Button(StudioText.clearSelection) { model.clearPhotoSelection() }
+                        Divider()
+                        Button(StudioText.copy) { model.copyCurrentAdjustmentsToSelected() }
+                            .disabled(model.selectedPhotoIndices.isEmpty)
+                        ForEach(BuiltInPreset.allCases) { preset in
+                            Button("\(preset.displayName) → \(StudioText.selected)") {
+                                model.applyPresetToSelected(preset)
+                            }
+                            .disabled(model.selectedPhotoIndices.isEmpty)
+                        }
+                    }
+                    Divider()
+                    Section(StudioText.allPhotos.replacingOccurrences(of: "…", with: "")) {
+                        Button(StudioText.copy) { model.copyCurrentAdjustmentsToAll() }
+                        ForEach(BuiltInPreset.allCases) { preset in
+                            Button("\(preset.displayName) → \(StudioText.allPhotos.replacingOccurrences(of: "…", with: ""))") {
+                                model.applyPresetToAll(preset)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(StudioText.batch, systemImage: "square.stack.3d.up")
+                }
+                .disabled(model.isBatchAdjusting || model.isExporting || model.isSingleExporting)
+            }
         }.padding(.horizontal, 12).background(StudioUI.panel)
     }
 }

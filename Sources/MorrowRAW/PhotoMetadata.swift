@@ -2,24 +2,61 @@ import Foundation
 import ImageIO
 
 enum PhotoMetadataReader {
+    private static let dateFormatterLock = NSLock()
+    private static let dateFormatters: [(input: DateFormatter, output: DateFormatter)] = {
+        [
+            ("yyyy:MM:dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss"),
+            ("yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss"),
+            ("yyyy-MM-dd", "yyyy/MM/dd")
+        ].map { inputFormat, outputFormat in
+            let input = DateFormatter()
+            input.locale = Locale(identifier: "en_US_POSIX")
+            input.dateFormat = inputFormat
+            let output = DateFormatter()
+            output.locale = Locale(identifier: "en_US_POSIX")
+            output.dateFormat = outputFormat
+            return (input, output)
+        }
+    }()
+
+    private final class CachedMetadata {
+        let value: ExifData
+
+        init(_ value: ExifData) {
+            self.value = value
+        }
+    }
+
+    private static let cache: NSCache<NSString, CachedMetadata> = {
+        let cache = NSCache<NSString, CachedMetadata>()
+        cache.countLimit = 128
+        return cache
+    }()
+
     static func displayDate(_ value: String) -> String {
         let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return "" }
-        for inputFormat in ["yyyy:MM:dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd"] {
-            let parser = DateFormatter()
-            parser.locale = Locale(identifier: "en_US_POSIX")
-            parser.dateFormat = inputFormat
-            if let date = parser.date(from: raw) {
-                let output = DateFormatter()
-                output.locale = Locale(identifier: "en_US_POSIX")
-                output.dateFormat = inputFormat.contains("HH") ? "yyyy/MM/dd HH:mm:ss" : "yyyy/MM/dd"
-                return output.string(from: date)
+        dateFormatterLock.lock()
+        defer { dateFormatterLock.unlock() }
+        for formatter in dateFormatters {
+            if let date = formatter.input.date(from: raw) {
+                return formatter.output.string(from: date)
             }
         }
         return raw
     }
 
     static func read(url: URL) -> ExifData? {
+        let key = PhotoFileFingerprint.key(for: url) as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.value
+        }
+        guard let value = readUncached(url: url) else { return nil }
+        cache.setObject(CachedMetadata(value), forKey: key)
+        return value
+    }
+
+    private static func readUncached(url: URL) -> ExifData? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         else { return nil }

@@ -2,15 +2,17 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
 
-enum RenderQuality {
+enum RenderQuality: Equatable {
     case interactive
     case finalPreview
     case export
 
     var previewDimension: CGFloat {
         switch self {
-        case .interactive: return 900
-        case .finalPreview: return 1800
+        // Keep drag feedback light enough for high-resolution RAW sources;
+        // the full-size refinement runs after the interaction ends.
+        case .interactive: return 720
+        case .finalPreview: return 2400
         case .export: return .greatestFiniteMagnitude
         }
     }
@@ -178,6 +180,7 @@ final class ImageRenderer {
             output = applyToneCurve(to: output, adjustments: adjustments)
         }
         if adjustments.noiseReduction >= 65,
+           quality != .interactive,
            output.extent.width * output.extent.height <= 4_000_000,
            let denoised = await MetalImageProcessor.shared.nonLocalMeansAsync(
             output, strength: CGFloat(adjustments.noiseReduction / 100), context: context
@@ -405,33 +408,44 @@ final class ImageRenderer {
         let extent = image.extent
         let maxDimension = max(extent.width, extent.height)
         let base = image
-        let replacements = await withTaskGroup(of: (Int, CIImage?).self,
+        let replacements = await withTaskGroup(of: [(Int, CIImage?)].self,
                                                 returning: [(Int, CIImage?)].self) { group in
-            for (index, spot) in spots.enumerated() {
+            // Independent spots can overlap GPU work, but launching one task
+            // per spot creates an unbounded number of command buffers and
+            // scratch textures. Two workers preserve useful parallelism while
+            // keeping the VRAM peak predictable.
+            let workerCount = min(2, spots.count)
+            for worker in 0..<workerCount {
                 group.addTask { [self] in
-                    let target = CGPoint(x: extent.minX + spot.targetX * extent.width,
-                                         y: extent.minY + spot.targetY * extent.height)
-                    let source = CGPoint(x: extent.minX + spot.sourceX * extent.width,
-                                         y: extent.minY + spot.sourceY * extent.height)
-                    let radius = max(1, spot.radiusNorm * maxDimension)
-                    let replacement: CIImage?
-                    if spot.useInpaint {
-                        replacement = await self.teleaInpaintAsync(
-                            base, target: target, radius: radius, strength: CGFloat(spot.strength),
-                            iterationScale: quality.repairIterationScale, extent: extent
-                        )
-                    } else {
-                        replacement = await self.poissonCloneAsync(
-                            base, target: target, source: source, radius: radius,
-                            strength: CGFloat(spot.strength), iterationScale: quality.repairIterationScale,
-                            extent: extent
-                        )
+                    var workerResults: [(Int, CIImage?)] = []
+                    for index in stride(from: worker, to: spots.count, by: workerCount) {
+                        guard !Task.isCancelled else { break }
+                        let spot = spots[index]
+                        let target = CGPoint(x: extent.minX + spot.targetX * extent.width,
+                                             y: extent.minY + spot.targetY * extent.height)
+                        let source = CGPoint(x: extent.minX + spot.sourceX * extent.width,
+                                             y: extent.minY + spot.sourceY * extent.height)
+                        let radius = max(1, spot.radiusNorm * maxDimension)
+                        let replacement: CIImage?
+                        if spot.useInpaint {
+                            replacement = await self.teleaInpaintAsync(
+                                base, target: target, radius: radius, strength: CGFloat(spot.strength),
+                                iterationScale: quality.repairIterationScale, extent: extent
+                            )
+                        } else {
+                            replacement = await self.poissonCloneAsync(
+                                base, target: target, source: source, radius: radius,
+                                strength: CGFloat(spot.strength), iterationScale: quality.repairIterationScale,
+                                extent: extent
+                            )
+                        }
+                        workerResults.append((index, replacement))
                     }
-                    return (index, replacement)
+                    return workerResults
                 }
             }
             var results: [(Int, CIImage?)] = []
-            for await result in group { results.append(result) }
+            for await workerResults in group { results.append(contentsOf: workerResults) }
             return results.sorted { $0.0 < $1.0 }
         }
 
