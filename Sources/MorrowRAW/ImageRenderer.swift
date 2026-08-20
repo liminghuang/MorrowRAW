@@ -37,13 +37,20 @@ final class ImageRenderer {
         return cache
     }()
 
+    private static let softwareContext = CIContext(options: [
+        .useSoftwareRenderer: true,
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB) as Any,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any
+    ])
+
     private let context: CIContext
 
     init() {
-        context = CIContext(options: [
+        let options: [CIContextOption: Any] = [
             .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB) as Any,
             .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any
-        ])
+        ]
+        context = CIContext(options: options)
     }
 
     func render(_ image: CIImage, adjustments: ImageAdjustments,
@@ -288,7 +295,7 @@ final class ImageRenderer {
     private func cpuPerceptualColorAdjust(_ image: CIImage, saturation: Double,
                                           vibrance: Double) -> CIImage? {
         let extent = image.extent
-        guard let raster = context.createCGImage(image, from: extent),
+        guard let raster = createCGImage(image, from: extent),
               let adjusted = CIELabColorAdjustment.adjust(
                 raster, saturation: CGFloat(saturation / 100),
                 vibrance: CGFloat(vibrance / 100)
@@ -322,7 +329,7 @@ final class ImageRenderer {
         if let denoised = MetalImageProcessor.shared.nonLocalMeans(
             image, strength: CGFloat(strength / 100), context: context
         ) { return denoised }
-        guard let raster = context.createCGImage(image, from: extent),
+        guard let raster = createCGImage(image, from: extent),
               let denoised = NonLocalMeansDenoising.denoise(
                 raster, strength: CGFloat(strength / 100)
               ) else { return nil }
@@ -534,7 +541,7 @@ final class ImageRenderer {
         ) {
             return repaired
         }
-        guard let raster = context.createCGImage(image, from: extent) else { return nil }
+        guard let raster = createCGImage(image, from: extent) else { return nil }
         guard let repaired = TeleaInpainting.inpaint(
             raster, center: rasterCenter, radius: max(1, Int(radius.rounded())),
             strength: strength
@@ -581,7 +588,7 @@ final class ImageRenderer {
         ) {
             return blended
         }
-        guard let raster = context.createCGImage(image, from: extent) else { return nil }
+        guard let raster = createCGImage(image, from: extent) else { return nil }
         guard let blended = PoissonClone.blend(
             raster, sourceCenter: sourceRaster, targetCenter: targetRaster,
             radius: max(1, Int(radius.rounded())), strength: strength
@@ -666,7 +673,7 @@ final class ImageRenderer {
             let innerRadius = radius * (1 - feather)
             var mask: CIImage?
 
-            let points = interpolatedBrushPoints(brush.points, radiusNorm: brush.radiusNorm)
+            let points = interpolatedBrushPoints(limitedBrushPoints(brush.points), radiusNorm: brush.radiusNorm)
             for point in points {
                 let center = CGPoint(x: extent.minX + point.x * extent.width,
                                      y: extent.minY + point.y * extent.height)
@@ -728,7 +735,23 @@ final class ImageRenderer {
             }
             result.append(pair.1)
         }
-        return result
+        guard result.count > 512 else { return result }
+        let strideSize = max(1, Int(ceil(Double(result.count) / 512)))
+        var limited = result.enumerated().compactMap { index, point in
+            index % strideSize == 0 ? point : nil
+        }
+        if let last = result.last, limited.last != last { limited.append(last) }
+        return limited
+    }
+
+    private func limitedBrushPoints(_ points: [AdjustmentBrushPoint]) -> [AdjustmentBrushPoint] {
+        guard points.count > 256 else { return points }
+        let strideSize = max(1, Int(ceil(Double(points.count) / 256)))
+        var limited = points.enumerated().compactMap { index, point in
+            index % strideSize == 0 ? point : nil
+        }
+        if let last = points.last, limited.last != last { limited.append(last) }
+        return limited
     }
 
     private func applyGeometry(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
@@ -841,7 +864,7 @@ final class ImageRenderer {
         let output = scale < 1
             ? rendered.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             : rendered
-        return context.createCGImage(output, from: output.extent)
+        return createCGImage(output, from: output.extent)
     }
 
     func makePreviewAsync(_ image: CIImage, adjustments: ImageAdjustments,
@@ -859,7 +882,11 @@ final class ImageRenderer {
         let output = scale < 1
             ? rendered.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             : rendered
-        return context.createCGImage(output, from: output.extent)
+        return createCGImage(output, from: output.extent)
+    }
+
+    private func createCGImage(_ image: CIImage, from extent: CGRect) -> CGImage? {
+        context.createCGImage(image, from: extent) ?? Self.softwareContext.createCGImage(image, from: extent)
     }
 }
 

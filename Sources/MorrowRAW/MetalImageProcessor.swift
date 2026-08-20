@@ -454,8 +454,11 @@ final class MetalImageProcessor {
 
         context.render(image, to: original, commandBuffer: commandBuffer,
                        bounds: extent, colorSpace: colorSpace)
-        context.render(image, to: ping, commandBuffer: commandBuffer,
-                       bounds: extent, colorSpace: colorSpace)
+        copyTexture(original, to: ping, width: width, height: height,
+                    commandBuffer: commandBuffer) {
+            context.render(image, to: ping, commandBuffer: commandBuffer,
+                           bounds: extent, colorSpace: colorSpace)
+        }
 
         var previous = ping
         var output = pong
@@ -558,8 +561,11 @@ final class MetalImageProcessor {
 
         context.render(image, to: original, commandBuffer: commandBuffer,
                        bounds: extent, colorSpace: colorSpace)
-        context.render(image, to: ping, commandBuffer: commandBuffer,
-                       bounds: extent, colorSpace: colorSpace)
+        copyTexture(original, to: ping, width: width, height: height,
+                    commandBuffer: commandBuffer) {
+            context.render(image, to: ping, commandBuffer: commandBuffer,
+                           bounds: extent, colorSpace: colorSpace)
+        }
 
         var previous = ping
         var output = pong
@@ -620,5 +626,24 @@ final class MetalImageProcessor {
                 rawBuffer.storeBytes(of: UInt32(iteration), toByteOffset: 24, as: UInt32.self)
             }
         }
+    }
+
+    private func copyTexture(_ source: MTLTexture, to destination: MTLTexture,
+                             width: Int, height: Int, commandBuffer: MTLCommandBuffer,
+                             fallback: () -> Void) {
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            fallback()
+            return
+        }
+        blit.copy(from: source,
+                  sourceSlice: 0,
+                  sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: width, height: height, depth: 1),
+                  to: destination,
+                  destinationSlice: 0,
+                  destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
     }
 }

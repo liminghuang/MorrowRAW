@@ -65,6 +65,28 @@ private final class LockedCounter: @unchecked Sendable {
 }
 
 final class CompatibilityTests: XCTestCase {
+    private func solidCGImage(red: CGFloat, green: CGFloat, blue: CGFloat,
+                              width: Int = 64, height: Int = 48) -> CGImage? {
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(red: red, green: green, blue: blue, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
+    func testNaturalColorAssistantAnalyzesDirectCGImageWithoutRenderer() {
+        guard let image = solidCGImage(red: 0.8, green: 0.42, blue: 0.18) else {
+            XCTFail("Could not create direct color fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: image)
+        XCTAssertEqual(suggestion.constancyMethods.count, 5)
+        XCTAssertLessThan(suggestion.temperatureDelta, 0)
+        XCTAssertTrue(suggestion.reasons.contains(.whiteBalance))
+    }
+
     func testAdjustmentSliderRangesFavorFineControlWithoutChangingPersistedDomain() {
         XCTAssertEqual(StudioAdjustmentRange.contrast, -50...50)
         XCTAssertEqual(StudioAdjustmentRange.highlights, -75...75)
@@ -157,6 +179,16 @@ final class CompatibilityTests: XCTestCase {
         model.beginAdjustmentBrush(at: CGPoint(x: 0.5, y: 0.5))
         model.clearAdjustmentBrushes()
         XCTAssertTrue(model.adjustments.adjustmentBrushes.isEmpty)
+    }
+
+    @MainActor
+    func testAdjustmentBrushCoalescesPointerSamplesByBrushRadius() {
+        let model = EditorViewModel()
+        model.beginAdjustmentBrush(at: CGPoint(x: 0.2, y: 0.5))
+        for index in 1...100 {
+            model.appendAdjustmentBrushPoint(CGPoint(x: 0.2 + Double(index) * 0.0002, y: 0.5))
+        }
+        XCTAssertLessThan(model.adjustments.adjustmentBrushes.first?.points.count ?? 0, 30)
     }
 
     func testNearbyThumbnailIndicesPreferAdjacentPhotosAndExcludeCurrent() {
@@ -457,7 +489,7 @@ final class CompatibilityTests: XCTestCase {
             return
         }
         let estimate = ColorConstancyAnalyzer.estimate(for: preview)
-        XCTAssertEqual(estimate.methods.count, 4)
+        XCTAssertEqual(estimate.methods.count, 5)
         XCTAssertLessThan(estimate.agreementDegrees, 20)
         XCTAssertGreaterThan(estimate.confidence, 0.45)
         XCTAssertEqual(estimate.correctionGains.x, estimate.correctionGains.z, accuracy: 0.08)
@@ -491,6 +523,9 @@ final class CompatibilityTests: XCTestCase {
         let adjusted = suggestion.applying(to: existing)
         XCTAssertEqual(adjusted.sharpening, 24)
         XCTAssertEqual(adjusted.exposure, 0.5 + suggestion.exposureDelta, accuracy: 0.0001)
+        XCTAssertEqual(suggestion.applying(to: existing, strength: 0).exposure, existing.exposure, accuracy: 0.0001)
+        XCTAssertEqual(suggestion.applying(to: existing, strength: 0.5).exposure,
+                       0.5 + suggestion.exposureDelta * 0.5, accuracy: 0.0001)
     }
 
     func testColorScopesProduceWaveformVectorscopeAndClippingMetrics() {

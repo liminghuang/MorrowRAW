@@ -3,6 +3,7 @@ import Foundation
 
 struct ColorAnalysis: Equatable {
     let averageLuminance: Double
+    let medianLuminance: Double
     let shadowLuminance: Double
     let highlightLuminance: Double
     let redBalance: Double
@@ -61,94 +62,55 @@ struct NaturalColorSuggestion: Equatable {
         abs(vibranceDelta) > 0.1 || abs(saturationDelta) > 0.1
     }
 
-    func applying(to source: ImageAdjustments) -> ImageAdjustments {
+    func applying(to source: ImageAdjustments, strength: Double = 1) -> ImageAdjustments {
+        let amount = min(2, max(0, strength))
         var result = source
-        result.exposure = min(5, max(-5, source.exposure + exposureDelta))
-        result.contrast = min(100, max(-100, source.contrast + contrastDelta))
-        result.temperature = min(12000, max(2000, source.temperature + temperatureDelta))
-        result.tint = min(100, max(-100, source.tint + tintDelta))
-        result.vibrance = min(100, max(-100, source.vibrance + vibranceDelta))
-        result.saturation = min(100, max(-100, source.saturation + saturationDelta))
+        result.exposure = min(5, max(-5, source.exposure + exposureDelta * amount))
+        result.contrast = min(100, max(-100, source.contrast + contrastDelta * amount))
+        result.temperature = min(12000, max(2000, source.temperature + temperatureDelta * amount))
+        result.tint = min(100, max(-100, source.tint + tintDelta * amount))
+        result.vibrance = min(100, max(-100, source.vibrance + vibranceDelta * amount))
+        result.saturation = min(100, max(-100, source.saturation + saturationDelta * amount))
         return result
     }
 }
 
 enum NaturalColorAssistant {
     static func analyze(_ image: CGImage) -> ColorAnalysis {
-        let maxDimension = 256
-        let scale = min(1, CGFloat(maxDimension) / CGFloat(max(image.width, image.height)))
-        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
-        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
-        let bytesPerRow = width * 4
-        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        analyze(samples: ColorSampleBuffer.linearSamples(from: image))
+    }
 
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return ColorAnalysis(averageLuminance: 0.5, shadowLuminance: 0.2,
+    private static func analyze(samples: [LinearColorSample]) -> ColorAnalysis {
+        guard !samples.isEmpty else {
+            return ColorAnalysis(averageLuminance: 0.5, medianLuminance: 0.5,
+                                 shadowLuminance: 0.2,
                                  highlightLuminance: 0.8, redBalance: 0,
                                  greenBalance: 0, blueBalance: 0,
                                  averageSaturation: 0.2, clippedShadowFraction: 0,
                                  clippedHighlightFraction: 0, sampleCount: 0)
         }
-
-        context.interpolationQuality = .low
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        var luminances: [Double] = []
-        luminances.reserveCapacity(width * height)
-        var red = 0.0
-        var green = 0.0
-        var blue = 0.0
-        var saturation = 0.0
-        var clippedShadows = 0
-        var clippedHighlights = 0
-
-        for offset in stride(from: 0, to: pixels.count, by: 4) {
-            let alpha = Double(pixels[offset + 3]) / 255
-            guard alpha > 0.01 else { continue }
-            let r = Double(pixels[offset]) / 255
-            let g = Double(pixels[offset + 1]) / 255
-            let b = Double(pixels[offset + 2]) / 255
-            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            luminances.append(luminance)
-            red += r
-            green += g
-            blue += b
-            saturation += max(r, max(g, b)) - min(r, min(g, b))
-            if luminance <= 0.012 { clippedShadows += 1 }
-            if luminance >= 0.988 { clippedHighlights += 1 }
-        }
-
-        guard !luminances.isEmpty else {
-            return ColorAnalysis(averageLuminance: 0.5, shadowLuminance: 0.2,
-                                 highlightLuminance: 0.8, redBalance: 0,
-                                 greenBalance: 0, blueBalance: 0,
-                                 averageSaturation: 0.2, clippedShadowFraction: 0,
-                                 clippedHighlightFraction: 0, sampleCount: 0)
-        }
-
+        let luminances = samples.map(\.luminance)
         let sorted = luminances.sorted()
         let low = sorted[Int(Double(sorted.count - 1) * 0.05)]
         let high = sorted[Int(Double(sorted.count - 1) * 0.95)]
-        let count = Double(luminances.count)
-        let averageRed = red / count
-        let averageGreen = green / count
-        let averageBlue = blue / count
+        let count = Double(samples.count)
+        let averageRed = samples.reduce(0) { $0 + $1.red } / count
+        let averageGreen = samples.reduce(0) { $0 + $1.green } / count
+        let averageBlue = samples.reduce(0) { $0 + $1.blue } / count
+        let averageSaturation = samples.reduce(0) {
+            $0 + max($1.red, max($1.green, $1.blue)) - min($1.red, min($1.green, $1.blue))
+        } / count
+        let clippedShadows = luminances.filter { $0 <= 0.012 }.count
+        let clippedHighlights = luminances.filter { $0 >= 0.988 }.count
         return ColorAnalysis(
             averageLuminance: luminances.reduce(0, +) / count,
+            medianLuminance: sorted[sorted.count / 2],
             shadowLuminance: low,
             highlightLuminance: high,
             redBalance: averageRed - (averageGreen + averageBlue) / 2,
             greenBalance: averageGreen - (averageRed + averageBlue) / 2,
             blueBalance: averageBlue - (averageRed + averageGreen) / 2,
-            averageSaturation: saturation / count,
+            averageSaturation: averageSaturation,
             clippedShadowFraction: Double(clippedShadows) / count,
             clippedHighlightFraction: Double(clippedHighlights) / count,
             sampleCount: luminances.count
@@ -156,17 +118,29 @@ enum NaturalColorAssistant {
     }
 
     static func suggest(for image: CGImage) -> NaturalColorSuggestion {
-        let analysis = analyze(image)
-        let constancy = ColorConstancyAnalyzer.estimate(for: image)
-        let targetLuminance = 0.46
-        let exposure = min(1.5, max(-1.5, log2(targetLuminance / max(0.04, analysis.averageLuminance))))
+        let samples = ColorSampleBuffer.linearSamples(from: image)
+        let analysis = analyze(samples: samples)
+        let constancy = ColorConstancyAnalyzer.estimate(
+            samples: samples.filter { $0.luminance < 0.995 }
+        )
+        // Exposure estimation belongs in linear light. 0.18 is the usual
+        // middle-gray target; using an sRGB target here makes mid-tones look
+        // artificially close to correct and weakens the recommendation.
+        let targetLuminance = 0.18
+        let baseExposure = log2(targetLuminance / max(0.04, analysis.medianLuminance))
+        let highlightPenalty = min(1.5, analysis.clippedHighlightFraction * 60)
+        let shadowLift = analysis.clippedShadowFraction > 0.08 ? 8.0 : 0
+        let shadowBonus = min(0.35, max(0, analysis.clippedShadowFraction - 0.08) * 3)
+        let exposure = min(1.5, max(-1.5, baseExposure - highlightPenalty + shadowBonus))
+        let whiteBalanceScale = constancy.isReliable
+            ? 1.0
+            : min(1, max(0, constancy.confidence / 0.45))
         let temperature = min(1500, max(-1500,
-            (constancy.correctionGains.x - constancy.correctionGains.z) * 2200))
+            (constancy.correctionGains.x - constancy.correctionGains.z) * 2200 * whiteBalanceScale))
         let meanGain = (constancy.correctionGains.x + constancy.correctionGains.y + constancy.correctionGains.z) / 3
-        let tint = min(35, max(-35, (meanGain - constancy.correctionGains.y) * 160))
+        let tint = min(35, max(-35, (meanGain - constancy.correctionGains.y) * 160 * whiteBalanceScale))
         let range = analysis.dynamicRange
         let contrast = min(24, max(-18, (0.62 - range) * 80))
-        let shadowLift = analysis.clippedShadowFraction > 0.08 ? 8.0 : 0
         let highlightProtection = analysis.clippedHighlightFraction > 0.015 ? -10.0 : 0
         let vibrance = analysis.averageSaturation < 0.16 ?
             min(18, (0.16 - analysis.averageSaturation) * 100) : 0
@@ -197,4 +171,5 @@ enum NaturalColorAssistant {
             constancyMethods: constancy.methods
         )
     }
+
 }

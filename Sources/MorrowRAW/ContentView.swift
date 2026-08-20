@@ -19,6 +19,8 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var histogram: [CGFloat] = []
     @Published var rgbHistogram = RGBHistogram.empty
     @Published var naturalColorSuggestion: NaturalColorSuggestion?
+    @Published var naturalColorStrength = 1.0
+    @Published private(set) var isAnalyzingNaturalColor = false
     @Published var referencePhotoName = ""
     @Published var colorScopes = ColorScopeSnapshot.empty
     @Published var semanticRegions: [SemanticRegionSuggestion] = []
@@ -455,6 +457,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         isLoadingPhoto = false
         errorMessage = nil
         naturalColorSuggestion = nil
+        naturalColorStrength = 1.0
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
@@ -494,6 +497,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         }
         adjustments = nextAdjustments
         naturalColorSuggestion = nil
+        naturalColorStrength = 1.0
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
@@ -617,6 +621,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         virtualCopyIndex = 0
         adjustments = ImageAdjustments()
         naturalColorSuggestion = nil
+        naturalColorStrength = 1.0
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
@@ -1201,8 +1206,23 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
             errorMessage = StudioText.localized("請先開啟可預覽的照片", "Open a photo with a preview first")
             return
         }
-        colorScopes = ColorScopeCalculator.snapshot(for: image)
-        naturalColorSuggestion = NaturalColorAssistant.suggest(for: image)
+        guard !isAnalyzingNaturalColor else { return }
+        isAnalyzingNaturalColor = true
+        let model = self
+        let generation = sourceGeneration
+        Task.detached(priority: .userInitiated) {
+            let scopes = ColorScopeCalculator.snapshot(for: image)
+            let suggestion = NaturalColorAssistant.suggest(for: image)
+            await MainActor.run {
+                guard model.sourceGeneration == generation else {
+                    model.isAnalyzingNaturalColor = false
+                    return
+                }
+                model.colorScopes = scopes
+                model.naturalColorSuggestion = suggestion
+                model.isAnalyzingNaturalColor = false
+            }
+        }
     }
 
     func refreshColorScopes() {
@@ -1273,7 +1293,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     func applyNaturalColorSuggestion() {
         guard let suggestion = naturalColorSuggestion, suggestion.hasChanges else { return }
         beginInteractiveAdjustment()
-        adjustments = suggestion.applying(to: adjustments)
+        adjustments = suggestion.applying(to: adjustments, strength: naturalColorStrength)
         finishInteractiveAdjustment()
     }
 
@@ -1330,6 +1350,14 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         guard let last = adjustments.adjustmentBrushes.indices.last else { return }
         let previous = adjustments.adjustmentBrushes[last].points.last
         guard previous?.x != x || previous?.y != y else { return }
+        if let previous {
+            // Pointer events arrive much more frequently than the brush
+            // diameter requires. Coalesce nearby samples so the Core Image
+            // union mask does not grow one gradient node per event.
+            let radiusNorm = adjustments.adjustmentBrushes[last].radiusNorm
+            let minimumDistance = max(0.0015, radiusNorm * 0.18)
+            guard hypot(x - previous.x, y - previous.y) >= minimumDistance else { return }
+        }
         adjustments.adjustmentBrushes[last].points.append(AdjustmentBrushPoint(x: x, y: y))
         scheduleRender(recordHistory: false)
     }

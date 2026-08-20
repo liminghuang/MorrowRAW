@@ -738,9 +738,13 @@ private struct StudioInspector: View {
             ))
             .font(.caption).foregroundStyle(StudioUI.secondary)
             HStack {
-                Button(StudioText.localized("分析色彩", "Analyze Color")) {
+                Button(model.isAnalyzingNaturalColor
+                       ? StudioText.localized("分析中…", "Analyzing…")
+                       : StudioText.localized("分析色彩", "Analyze Color")) {
                     model.suggestNaturalColor()
-                }.buttonStyle(.borderedProminent)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isAnalyzingNaturalColor || model.preview == nil)
                 Button(StudioText.localized("套用建議", "Apply Suggestion")) {
                     model.applyNaturalColorSuggestion()
                 }
@@ -758,6 +762,14 @@ private struct StudioInspector: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(StudioUI.secondary)
                 }
+                StudioAdjustmentSlider(
+                    title: StudioText.localized("建議強度", "Suggestion Strength"),
+                    value: Binding(get: { model.naturalColorStrength * 100 },
+                                   set: { model.naturalColorStrength = min(2, max(0, $0 / 100)) }),
+                    range: 0...200,
+                    onChange: {},
+                    onEditingChanged: { _ in }
+                )
                 Text(StudioText.localized(
                     "演算法共識：\(suggestion.constancyMethods.joined(separator: "、"))；分歧 \(String(format: "%.1f°", suggestion.constancyAgreementDegrees))",
                     "Estimator consensus: \(suggestion.constancyMethods.joined(separator: ", ")); disagreement \(String(format: "%.1f°", suggestion.constancyAgreementDegrees))"
