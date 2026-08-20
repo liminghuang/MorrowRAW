@@ -355,6 +355,8 @@ final class CompatibilityTests: XCTestCase {
         let bottom = 99 * result.bytesPerRow + 80 * 4
         XCTAssertGreaterThan(bytes[top], 30)
         XCTAssertGreaterThan(bytes[bottom], 30)
+        XCTAssertGreaterThan(bytes[top + 3], 240)
+        XCTAssertGreaterThan(bytes[bottom + 3], 240)
     }
 
     func testEmptyAdjustmentBrushDoesNotAlterImage() {

@@ -26,6 +26,7 @@ struct StudioWorkspace: View {
     @State private var brushOpen = false
     @State private var versionsOpen = false
     @State private var localTool: LocalToolMode = .none
+    @State private var isBrushParameterEditing = false
     @State private var pendingHealTarget: CGPoint?
 
     var body: some View {
@@ -35,11 +36,13 @@ struct StudioWorkspace: View {
                 StudioLibrary(model: model)
                     .frame(width: 224)
                 Rectangle().fill(StudioUI.divider).frame(width: 1)
-                StudioCanvas(model: model, localTool: $localTool, pendingHealTarget: $pendingHealTarget)
+                StudioCanvas(model: model, localTool: $localTool, pendingHealTarget: $pendingHealTarget,
+                             isBrushParameterEditing: isBrushParameterEditing)
                 Rectangle().fill(StudioUI.divider).frame(width: 1)
                 StudioInspector(model: model, activeTab: $activeTab,
                                 basicOpen: $basicOpen, naturalColorOpen: $naturalColorOpen,
                                 referenceMatchOpen: $referenceMatchOpen,
+                                isBrushParameterEditing: $isBrushParameterEditing,
                                 scopesOpen: $scopesOpen,
                                 semanticOpen: $semanticOpen,
                                 colorCheckerOpen: $colorCheckerOpen,
@@ -218,6 +221,7 @@ private struct StudioCanvas: View {
     @ObservedObject var model: EditorViewModel
     @Binding var localTool: LocalToolMode
     @Binding var pendingHealTarget: CGPoint?
+    let isBrushParameterEditing: Bool
     @State private var pointerLocation: CGPoint?
     @State private var draggingSourceIndex: Int?
     @State private var hoveredSourceIndex: Int?
@@ -348,7 +352,8 @@ private struct StudioCanvas: View {
                                  hoveredSourceIndex: hoveredSourceIndex,
                                  hoveredGradientIndex: hoveredGradientIndex,
                                  zoomScale: model.zoomScale,
-                                 panOffset: panOffset)
+                                 panOffset: panOffset,
+                                 isBrushParameterEditing: isBrushParameterEditing)
                     .scaleEffect(model.zoomScale)
                     .offset(panOffset)
             }
@@ -691,6 +696,7 @@ private struct StudioInspector: View {
     @Binding var basicOpen: Bool
     @Binding var naturalColorOpen: Bool
     @Binding var referenceMatchOpen: Bool
+    @Binding var isBrushParameterEditing: Bool
     @Binding var scopesOpen: Bool
     @Binding var semanticOpen: Bool
     @Binding var colorCheckerOpen: Bool
@@ -936,6 +942,7 @@ private struct StudioInspector: View {
                 ), range: 8...160,
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
+                    isBrushParameterEditing = editing
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
@@ -944,19 +951,20 @@ private struct StudioInspector: View {
                 ), range: 0...100,
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
+                    isBrushParameterEditing = editing
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
-                slider(StudioText.localized("局部曝光", "Local Exposure"), brushBinding(index, keyPath: \.exposure), -2...2)
-                slider(StudioText.localized("局部對比", "Local Contrast"), brushBinding(index, keyPath: \.contrast), StudioAdjustmentRange.contrast)
-                slider(StudioText.localized("局部亮部", "Local Highlights"), brushBinding(index, keyPath: \.highlights), StudioAdjustmentRange.highlights)
-                slider(StudioText.localized("局部暗部", "Local Shadows"), brushBinding(index, keyPath: \.shadows), StudioAdjustmentRange.shadows)
-                slider(StudioText.localized("局部白色", "Local Whites"), brushBinding(index, keyPath: \.whites), StudioAdjustmentRange.whites)
-                slider(StudioText.localized("局部黑色", "Local Blacks"), brushBinding(index, keyPath: \.blacks), StudioAdjustmentRange.blacks)
-                slider(StudioText.localized("局部色溫", "Local Temperature"), brushBinding(index, keyPath: \.temperature, fallback: 5200), 2000...12000)
-                slider(StudioText.localized("局部色調", "Local Tint"), brushBinding(index, keyPath: \.tint), StudioAdjustmentRange.tint)
-                slider(StudioText.localized("局部鮮豔度", "Local Vibrance"), brushBinding(index, keyPath: \.vibrance), StudioAdjustmentRange.vibrance)
-                slider(StudioText.localized("局部飽和度", "Local Saturation"), brushBinding(index, keyPath: \.saturation), StudioAdjustmentRange.saturation)
+                slider(StudioText.localized("局部曝光", "Local Exposure"), brushBinding(index, keyPath: \.exposure), -2...2, isBrushParameter: true)
+                slider(StudioText.localized("局部對比", "Local Contrast"), brushBinding(index, keyPath: \.contrast), StudioAdjustmentRange.contrast, isBrushParameter: true)
+                slider(StudioText.localized("局部亮部", "Local Highlights"), brushBinding(index, keyPath: \.highlights), StudioAdjustmentRange.highlights, isBrushParameter: true)
+                slider(StudioText.localized("局部暗部", "Local Shadows"), brushBinding(index, keyPath: \.shadows), StudioAdjustmentRange.shadows, isBrushParameter: true)
+                slider(StudioText.localized("局部白色", "Local Whites"), brushBinding(index, keyPath: \.whites), StudioAdjustmentRange.whites, isBrushParameter: true)
+                slider(StudioText.localized("局部黑色", "Local Blacks"), brushBinding(index, keyPath: \.blacks), StudioAdjustmentRange.blacks, isBrushParameter: true)
+                slider(StudioText.localized("局部色溫", "Local Temperature"), brushBinding(index, keyPath: \.temperature, fallback: 5200), 2000...12000, isBrushParameter: true)
+                slider(StudioText.localized("局部色調", "Local Tint"), brushBinding(index, keyPath: \.tint), StudioAdjustmentRange.tint, isBrushParameter: true)
+                slider(StudioText.localized("局部鮮豔度", "Local Vibrance"), brushBinding(index, keyPath: \.vibrance), StudioAdjustmentRange.vibrance, isBrushParameter: true)
+                slider(StudioText.localized("局部飽和度", "Local Saturation"), brushBinding(index, keyPath: \.saturation), StudioAdjustmentRange.saturation, isBrushParameter: true)
             }
         }
         StudioSection(title: StudioText.versions, systemImage: "square.on.square", isExpanded: $versionsOpen) {
@@ -964,10 +972,12 @@ private struct StudioInspector: View {
         }
     }
 
-    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {
+    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
+                        isBrushParameter: Bool = false) -> some View {
         StudioAdjustmentSlider(title: title, value: value, range: range,
                                onChange: { model.scheduleRender(recordHistory: false) },
                                onEditingChanged: { editing in
+                                   if isBrushParameter { isBrushParameterEditing = editing }
                                    if editing { model.beginInteractiveAdjustment() }
                                    else { model.finishInteractiveAdjustment() }
                                })
@@ -1182,6 +1192,7 @@ private struct LocalToolMarkers: View {
     let hoveredGradientIndex: Int?
     let zoomScale: CGFloat
     let panOffset: CGSize
+    let isBrushParameterEditing: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -1218,19 +1229,10 @@ private struct LocalToolMarkers: View {
                                   isActive: localTool == .gradient,
                                   isHovered: hoveredGradientIndex == index)
                 }
-                ForEach(Array(model.adjustments.adjustmentBrushes.enumerated()), id: \.offset) { index, brush in
-                    Path { path in
-                        guard let first = brush.points.first else { return }
-                        path.move(to: CGPoint(x: first.x * geometry.size.width,
-                                              y: (1 - first.y) * geometry.size.height))
-                        for point in brush.points.dropFirst() {
-                            path.addLine(to: CGPoint(x: point.x * geometry.size.width,
-                                                     y: (1 - point.y) * geometry.size.height))
-                        }
-                    }
-                    .stroke(index == model.adjustments.adjustmentBrushes.count - 1
-                            ? Color.yellow.opacity(0.9) : Color.white.opacity(0.35),
-                            style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                if localTool == .brush && !isBrushParameterEditing &&
+                    !model.adjustments.adjustmentBrushes.isEmpty {
+                    BrushMaskOverlay(brushes: model.adjustments.adjustmentBrushes,
+                                     size: geometry.size)
                 }
                 if localTool == .heal, let pendingHealTarget {
                     let point = CGPoint(x: pendingHealTarget.x * geometry.size.width,
@@ -1252,7 +1254,7 @@ private struct LocalToolMarkers: View {
                         .position(logicalPoint)
                         .shadow(color: .black, radius: 2)
                 }
-                if localTool == .brush, let pointerLocation {
+                if localTool == .brush, !isBrushParameterEditing, let pointerLocation {
                     let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
                     let logicalPoint = CGPoint(
                         x: (pointerLocation.x - center.x - panOffset.width) / max(0.001, zoomScale) + center.x,
@@ -1260,7 +1262,20 @@ private struct LocalToolMarkers: View {
                     )
                     let radiusNorm = model.adjustments.adjustmentBrushes.last?.radiusNorm ?? 0.045
                     let diameter = max(16, radiusNorm * max(geometry.size.width, geometry.size.height) * 2)
-                    Circle().stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                    let radius = diameter / max(0.001, zoomScale) / 2
+                    Circle()
+                        .fill(RadialGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: Color.yellow.opacity(0.16), location: 0),
+                                .init(color: Color.yellow.opacity(0.10), location: 0.45),
+                                .init(color: .clear, location: 1)
+                            ]),
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: radius
+                        ))
+                        .overlay(Circle().stroke(Color.white.opacity(0.85),
+                                                  style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])))
                         .frame(width: diameter / max(0.001, zoomScale),
                                height: diameter / max(0.001, zoomScale))
                         .position(logicalPoint)
@@ -1270,6 +1285,86 @@ private struct LocalToolMarkers: View {
         }
         .clipped()
         .allowsHitTesting(false)
+    }
+}
+
+private struct BrushMaskOverlay: View {
+    let brushes: [AdjustmentBrush]
+    let size: CGSize
+
+    var body: some View {
+        Canvas { context, _ in
+            // Draw the mist as a union mask. A normal source-over pass would
+            // accumulate alpha every time a stroke crosses itself, making the
+            // overlay look like it is painting over the photograph.
+            context.drawLayer { fog in
+                fog.blendMode = .lighten
+                drawFog(for: brushes, in: &fog)
+            }
+            drawGuides(for: brushes, in: &context)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func drawFog(for brushes: [AdjustmentBrush], in context: inout GraphicsContext) {
+        for (index, brush) in brushes.enumerated() {
+            let isActive = index == brushes.count - 1
+            let color = isActive ? Color.yellow : Color.white
+            let opacity = isActive ? 0.12 : 0.045
+            let radius = max(1, brush.radiusNorm * max(size.width, size.height))
+            let feather = min(1, max(0, brush.feather))
+            let solidEnd = max(0, min(1, 1 - feather))
+            let points = sampledPoints(for: brush)
+            guard !points.isEmpty else { continue }
+
+            for point in points {
+                let center = CGPoint(x: point.x * size.width,
+                                     y: (1 - point.y) * size.height)
+                let rect = CGRect(x: center.x - radius,
+                                  y: center.y - radius,
+                                  width: radius * 2,
+                                  height: radius * 2)
+                let gradient = Gradient(stops: [
+                    .init(color: color.opacity(opacity), location: 0),
+                    .init(color: color.opacity(opacity * 0.9), location: solidEnd),
+                    .init(color: .clear, location: 1)
+                ])
+                context.fill(Path(ellipseIn: rect), with: .radialGradient(
+                    gradient, center: center, startRadius: 0, endRadius: radius
+                ))
+            }
+        }
+    }
+
+    private func drawGuides(for brushes: [AdjustmentBrush], in context: inout GraphicsContext) {
+            for (index, brush) in brushes.enumerated() {
+                let isActive = index == brushes.count - 1
+                let color = isActive ? Color.yellow : Color.white
+                let points = sampledPoints(for: brush)
+                guard !points.isEmpty else { continue }
+                if let first = points.first {
+                    var path = Path()
+                    path.move(to: CGPoint(x: first.x * size.width,
+                                          y: (1 - first.y) * size.height))
+                    for point in points.dropFirst() {
+                        path.addLine(to: CGPoint(x: point.x * size.width,
+                                                 y: (1 - point.y) * size.height))
+                    }
+                    context.stroke(path, with: .color(color.opacity(isActive ? 0.62 : 0.2)),
+                                   style: StrokeStyle(lineWidth: isActive ? 1.5 : 1,
+                                                      dash: isActive ? [5, 4] : [3, 5]))
+                }
+            }
+    }
+
+    private func sampledPoints(for brush: AdjustmentBrush) -> [AdjustmentBrushPoint] {
+        guard brush.points.count > 240 else { return brush.points }
+        let strideSize = max(1, Int(ceil(Double(brush.points.count) / 240)))
+        var result = brush.points.enumerated().compactMap { index, point in
+            index % strideSize == 0 ? point : nil
+        }
+        if let last = brush.points.last, result.last != last { result.append(last) }
+        return result
     }
 }
 

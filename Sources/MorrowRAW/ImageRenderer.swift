@@ -675,7 +675,10 @@ final class ImageRenderer {
                 radial?.setValue(Float(innerRadius), forKey: "inputRadius0")
                 radial?.setValue(Float(radius), forKey: "inputRadius1")
                 radial?.setValue(CIColor.white, forKey: "inputColor0")
-                radial?.setValue(CIColor.clear, forKey: "inputColor1")
+                // Keep the mask opaque outside the brush. A transparent-black
+                // mask can propagate an unexpected alpha/black region through
+                // CIBlendWithMask when the source is a large RAW graph.
+                radial?.setValue(CIColor.black, forKey: "inputColor1")
                 guard let radialImage = radial?.outputImage?.cropped(to: extent) else { continue }
                 if let existingMask = mask {
                     let maximum = CIFilter(name: "CIMaximumCompositing")
@@ -687,12 +690,13 @@ final class ImageRenderer {
                 }
             }
             guard let mask else { continue }
-            let adjusted = applyLocalBasicAdjustments(to: output, brush: brush)
+            let base = output.cropped(to: extent)
+            let adjusted = applyLocalBasicAdjustments(to: base, brush: brush).cropped(to: extent)
             let blend = CIFilter.blendWithMask()
             blend.inputImage = adjusted
-            blend.backgroundImage = output
+            blend.backgroundImage = base
             blend.maskImage = mask
-            output = blend.outputImage?.cropped(to: extent) ?? output
+            output = blend.outputImage?.cropped(to: extent) ?? base
         }
         return output
     }
