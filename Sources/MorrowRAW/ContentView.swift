@@ -18,6 +18,14 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var preview: NSImage?
     @Published var histogram: [CGFloat] = []
     @Published var rgbHistogram = RGBHistogram.empty
+    @Published var naturalColorSuggestion: NaturalColorSuggestion?
+    @Published var referencePhotoName = ""
+    @Published var colorScopes = ColorScopeSnapshot.empty
+    @Published var semanticRegions: [SemanticRegionSuggestion] = []
+    @Published private(set) var isAnalyzingSemanticRegions = false
+    @Published var colorCheckerSamples: [ColorCheckerSample] = []
+    @Published var colorCheckerPatchIndex = 0
+    @Published var colorCheckerProfile: ColorCheckerProfile?
     @Published var sourceName = StudioText.notSelected
     @Published private(set) var previewMaxDimension: CGFloat = 1800
     @Published var errorMessage: String?
@@ -446,6 +454,13 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     private func applyLoadedPhoto(url: URL, copyIndex: Int, image: CIImage, exif: ExifData?) {
         isLoadingPhoto = false
         errorMessage = nil
+        naturalColorSuggestion = nil
+        referencePhotoName = ""
+        colorScopes = .empty
+        semanticRegions = []
+        colorCheckerSamples = []
+        colorCheckerPatchIndex = 0
+        colorCheckerProfile = nil
         source = image
         sourceGeneration = UUID()
         cachedOriginalPreview = nil
@@ -478,6 +493,13 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
             errorMessage = error.localizedDescription
         }
         adjustments = nextAdjustments
+        naturalColorSuggestion = nil
+        referencePhotoName = ""
+        colorScopes = .empty
+        semanticRegions = []
+        colorCheckerSamples = []
+        colorCheckerPatchIndex = 0
+        colorCheckerProfile = nil
         adjustmentURL = xmlURL
         currentPhotoURL = url
         virtualCopyIndex = copyIndex
@@ -594,6 +616,13 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         selectedPhotoIndices = []
         virtualCopyIndex = 0
         adjustments = ImageAdjustments()
+        naturalColorSuggestion = nil
+        referencePhotoName = ""
+        colorScopes = .empty
+        semanticRegions = []
+        colorCheckerSamples = []
+        colorCheckerPatchIndex = 0
+        colorCheckerProfile = nil
         preview = nil
         histogram = []
         rgbHistogram = .empty
@@ -924,6 +953,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
 
     func resetAllAdjustments() {
         adjustments = ImageAdjustments()
+        naturalColorSuggestion = nil
         scheduleRender()
     }
 
@@ -1163,6 +1193,118 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     func addGradient() {
         adjustments.gradients.append(LinearGradient())
         scheduleRender()
+    }
+
+    func suggestNaturalColor() {
+        guard let preview,
+              let image = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            errorMessage = StudioText.localized("請先開啟可預覽的照片", "Open a photo with a preview first")
+            return
+        }
+        colorScopes = ColorScopeCalculator.snapshot(for: image)
+        naturalColorSuggestion = NaturalColorAssistant.suggest(for: image)
+    }
+
+    func refreshColorScopes() {
+        guard let preview,
+              let image = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        colorScopes = ColorScopeCalculator.snapshot(for: image)
+    }
+
+    func analyzeSemanticRegions() {
+        guard !isAnalyzingSemanticRegions,
+              let preview,
+              let image = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        isAnalyzingSemanticRegions = true
+        let model = self
+        let generation = sourceGeneration
+        Task.detached(priority: .userInitiated) {
+            let regions = SemanticMaskAnalyzer.detect(in: image)
+            await MainActor.run {
+                guard model.sourceGeneration == generation else {
+                    model.isAnalyzingSemanticRegions = false
+                    return
+                }
+                model.semanticRegions = regions
+                model.isAnalyzingSemanticRegions = false
+            }
+        }
+    }
+
+    func applySemanticRegion(_ region: SemanticRegionSuggestion) {
+        guard region.points.count >= 3 else { return }
+        var brush = AdjustmentBrush(points: region.points)
+        brush.radiusNorm = 0.045
+        brush.feather = 0.8
+        adjustments.adjustmentBrushes.append(brush)
+        scheduleRender()
+    }
+
+    func startColorCheckerCalibration() {
+        colorCheckerSamples = []
+        colorCheckerPatchIndex = 0
+        colorCheckerProfile = nil
+    }
+
+    func captureColorCheckerSample(at point: CGPoint) {
+        guard colorCheckerPatchIndex < ColorCheckerProfile.classicReferenceRGB.count,
+              let preview,
+              let image = preview.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let measured = ColorCheckerProfile.sampleRGB(from: image, normalizedPoint: point) else { return }
+        let reference = ColorCheckerProfile.classicReferenceRGB[colorCheckerPatchIndex]
+        colorCheckerSamples.append(ColorCheckerSample(measured: measured, reference: reference))
+        colorCheckerPatchIndex += 1
+        if colorCheckerSamples.count == ColorCheckerProfile.classicReferenceRGB.count {
+            finishColorCheckerCalibration()
+        }
+    }
+
+    func finishColorCheckerCalibration() {
+        guard let profile = ColorCheckerProfile.calibrate(samples: colorCheckerSamples) else {
+            errorMessage = StudioText.localized("至少需要 3 個有效色卡樣本", "At least 3 valid chart samples are required")
+            return
+        }
+        beginInteractiveAdjustment()
+        adjustments.colorProfileMatrix = profile.matrix
+        colorCheckerProfile = profile
+        finishInteractiveAdjustment()
+    }
+
+    func applyNaturalColorSuggestion() {
+        guard let suggestion = naturalColorSuggestion, suggestion.hasChanges else { return }
+        beginInteractiveAdjustment()
+        adjustments = suggestion.applying(to: adjustments)
+        finishInteractiveAdjustment()
+    }
+
+    func clearNaturalColorSuggestion() {
+        naturalColorSuggestion = nil
+        referencePhotoName = ""
+    }
+
+    func matchReferencePhoto() {
+        guard preview?.cgImage(forProposedRect: nil, context: nil, hints: nil) != nil else {
+            errorMessage = StudioText.localized("請先開啟可預覽的照片", "Open a photo with a preview first")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let currentImage = preview?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        let sourceName = url.lastPathComponent
+        let model = self
+        let generation = sourceGeneration
+        Task.detached(priority: .userInitiated) {
+            guard let reference = try? ApplePhotoDecoder().decodePreview(url: url, maxDimension: 720),
+                  let referenceImage = ImageRenderer.shared.makePreview(reference, adjustments: ImageAdjustments(), maxDimension: 720) else { return }
+            let suggestion = ReferenceColorMatcher.suggestion(source: currentImage, reference: referenceImage)
+            await MainActor.run {
+                guard model.sourceGeneration == generation else { return }
+                model.naturalColorSuggestion = suggestion
+                model.referencePhotoName = sourceName
+            }
+        }
     }
 
     func removeLastGradient() {

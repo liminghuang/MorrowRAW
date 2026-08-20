@@ -48,7 +48,8 @@ final class ImageRenderer {
 
     func render(_ image: CIImage, adjustments: ImageAdjustments,
                 quality: RenderQuality = .export) -> CIImage {
-        var output = applyBasicAdjustments(to: image, adjustments: adjustments)
+        let profiled = applyColorProfile(to: image, matrix: adjustments.colorProfileMatrix)
+        var output = applyBasicAdjustments(to: profiled, adjustments: adjustments)
 
         if adjustments.noiseReduction > 0 {
             if adjustments.noiseReduction >= 65 {
@@ -111,7 +112,7 @@ final class ImageRenderer {
     /// completion instead of blocking a worker on `waitUntilCompleted()`.
     func renderAsync(_ image: CIImage, adjustments: ImageAdjustments,
                      quality: RenderQuality = .finalPreview) async -> CIImage {
-        var output = image
+        var output = applyColorProfile(to: image, matrix: adjustments.colorProfileMatrix)
 
         if adjustments.exposure != 0 {
             let filter = CIFilter.exposureAdjust()
@@ -196,6 +197,20 @@ final class ImageRenderer {
             output = filter.outputImage ?? output
         }
         return output
+    }
+
+    private func applyColorProfile(to image: CIImage, matrix: [Double]) -> CIImage {
+        guard matrix.count == 9,
+              zip(matrix, ColorCheckerProfile.identityMatrix).contains(where: { abs($0 - $1) > 0.000001 }) else {
+            return image
+        }
+        let filter = CIFilter.colorMatrix()
+        filter.inputImage = image
+        filter.rVector = CIVector(x: CGFloat(matrix[0]), y: CGFloat(matrix[1]), z: CGFloat(matrix[2]), w: 0)
+        filter.gVector = CIVector(x: CGFloat(matrix[3]), y: CGFloat(matrix[4]), z: CGFloat(matrix[5]), w: 0)
+        filter.bVector = CIVector(x: CGFloat(matrix[6]), y: CGFloat(matrix[7]), z: CGFloat(matrix[8]), w: 0)
+        filter.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        return filter.outputImage ?? image
     }
 
     private func applyBasicAdjustments(to image: CIImage, adjustments: ImageAdjustments,

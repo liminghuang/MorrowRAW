@@ -6,12 +6,18 @@ private enum LocalToolMode: Equatable {
     case heal
     case gradient
     case brush
+    case colorChecker
 }
 
 struct StudioWorkspace: View {
     @ObservedObject var model: EditorViewModel
     @State private var activeTab = 0
     @State private var basicOpen = true
+    @State private var naturalColorOpen = true
+    @State private var referenceMatchOpen = true
+    @State private var scopesOpen = false
+    @State private var semanticOpen = false
+    @State private var colorCheckerOpen = false
     @State private var colorOpen = true
     @State private var detailOpen = false
     @State private var geometryOpen = false
@@ -32,7 +38,12 @@ struct StudioWorkspace: View {
                 StudioCanvas(model: model, localTool: $localTool, pendingHealTarget: $pendingHealTarget)
                 Rectangle().fill(StudioUI.divider).frame(width: 1)
                 StudioInspector(model: model, activeTab: $activeTab,
-                                basicOpen: $basicOpen, colorOpen: $colorOpen,
+                                basicOpen: $basicOpen, naturalColorOpen: $naturalColorOpen,
+                                referenceMatchOpen: $referenceMatchOpen,
+                                scopesOpen: $scopesOpen,
+                                semanticOpen: $semanticOpen,
+                                colorCheckerOpen: $colorCheckerOpen,
+                                colorOpen: $colorOpen,
                                 detailOpen: $detailOpen, geometryOpen: $geometryOpen,
                                 gradientOpen: $gradientOpen, healOpen: $healOpen, brushOpen: $brushOpen,
                                 versionsOpen: $versionsOpen,
@@ -301,8 +312,10 @@ private struct StudioCanvas: View {
                                  : StudioText.localized("仿製修補：第 2 步，點擊乾淨天空作為來源", "Clone heal: Step 2, click clean sky as the source"))
                               : localTool == .gradient
                               ? StudioText.localized("漸層工具：紫色虛線是作用方向與範圍，請調整右側滑桿", "Gradient tool: the purple dashed line shows direction and range; adjust the sliders on the right")
-                              : StudioText.localized("調整筆刷：在照片上拖曳塗抹，右側可調整羽化與基本參數", "Adjustment brush: paint over the photo; adjust feather and basic values on the right"),
-                              systemImage: localTool == .heal ? "paintbrush.pointed" : (localTool == .gradient ? "line.diagonal" : "paintbrush.fill"))
+                              : localTool == .brush
+                              ? StudioText.localized("調整筆刷：在照片上拖曳塗抹，右側可調整羽化與基本參數", "Adjustment brush: paint over the photo; adjust feather and basic values on the right")
+                              : StudioText.localized("ColorChecker：依序點擊 24 個色卡色塊", "ColorChecker: click the 24 chart patches in order"),
+                              systemImage: localTool == .heal ? "paintbrush.pointed" : (localTool == .gradient ? "line.diagonal" : (localTool == .brush ? "paintbrush.fill" : "square.grid.3x3")))
                             .font(.caption.weight(.medium))
                             .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(.black.opacity(0.72), in: Capsule())
@@ -399,6 +412,9 @@ private struct StudioCanvas: View {
                     }
                     return
                 }
+                if localTool == .colorChecker {
+                    return
+                }
                 if localTool == .none,
                    !model.healingBrushEnabled,
                    !model.whiteBalancePickerEnabled,
@@ -431,6 +447,11 @@ private struct StudioCanvas: View {
                 if drawingAdjustmentBrush {
                     drawingAdjustmentBrush = false
                     model.finishInteractiveAdjustment()
+                    return
+                }
+                if localTool == .colorChecker {
+                    let point = normalizedPoint(from: value.location, in: geometry.size)
+                    model.captureColorCheckerSample(at: point)
                     return
                 }
                 guard model.whiteBalancePickerEnabled ||
@@ -668,6 +689,11 @@ private struct StudioInspector: View {
     @ObservedObject var model: EditorViewModel
     @Binding var activeTab: Int
     @Binding var basicOpen: Bool
+    @Binding var naturalColorOpen: Bool
+    @Binding var referenceMatchOpen: Bool
+    @Binding var scopesOpen: Bool
+    @Binding var semanticOpen: Bool
+    @Binding var colorCheckerOpen: Bool
     @Binding var colorOpen: Bool
     @Binding var detailOpen: Bool
     @Binding var geometryOpen: Bool
@@ -680,17 +706,113 @@ private struct StudioInspector: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker(StudioText.localized("檢查器分頁", "Inspector Tabs"), selection: $activeTab) { Text(StudioText.adjustments).tag(0); Text(StudioText.presets).tag(1); Text(StudioText.export).tag(2); Text(StudioText.info).tag(3) }.pickerStyle(.segmented).padding(12)
+            Picker(StudioText.localized("檢查器分頁", "Inspector Tabs"), selection: $activeTab) {
+                Text(StudioText.adjustments).tag(0)
+                Text(StudioText.presets).tag(1)
+                Text(StudioText.export).tag(2)
+                Text(StudioText.info).tag(3)
+                Text(StudioText.colorManagement).tag(4)
+            }.pickerStyle(.segmented).padding(12)
             ScrollView {
                 if activeTab == 0 { adjustmentTab }
                 else if activeTab == 1 { presetTab }
                 else if activeTab == 2 { exportTab }
-                else { infoTab }
+                else if activeTab == 3 { infoTab }
+                else { colorManagementTab }
             }
         }.background(StudioUI.panel)
     }
 
     @ViewBuilder private var adjustmentTab: some View {
+        StudioSection(title: StudioText.localized("自然色彩助手", "Natural Color Assistant"),
+                      systemImage: "wand.and.stars", isExpanded: $naturalColorOpen) {
+            Text(StudioText.localized(
+                "分析曝光、色偏與對比，產生可調整、可復原的色彩建議。",
+                "Analyze exposure, color cast, and contrast into editable, undoable suggestions."
+            ))
+            .font(.caption).foregroundStyle(StudioUI.secondary)
+            HStack {
+                Button(StudioText.localized("分析色彩", "Analyze Color")) {
+                    model.suggestNaturalColor()
+                }.buttonStyle(.borderedProminent)
+                Button(StudioText.localized("套用建議", "Apply Suggestion")) {
+                    model.applyNaturalColorSuggestion()
+                }
+                .disabled(model.naturalColorSuggestion?.hasChanges != true)
+                Button(StudioText.localized("清除", "Clear")) {
+                    model.clearNaturalColorSuggestion()
+                }
+                .disabled(model.naturalColorSuggestion == nil)
+            }
+            if let suggestion = model.naturalColorSuggestion {
+                HStack {
+                    Text(StudioText.localized("信心度", "Confidence"))
+                    Spacer()
+                    Text("\(Int((suggestion.confidence * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(StudioUI.secondary)
+                }
+                Text(StudioText.localized(
+                    "演算法共識：\(suggestion.constancyMethods.joined(separator: "、"))；分歧 \(String(format: "%.1f°", suggestion.constancyAgreementDegrees))",
+                    "Estimator consensus: \(suggestion.constancyMethods.joined(separator: ", ")); disagreement \(String(format: "%.1f°", suggestion.constancyAgreementDegrees))"
+                ))
+                .font(.caption2).foregroundStyle(StudioUI.secondary)
+                if suggestion.reasons.isEmpty {
+                    Text(StudioText.localized("目前影像已接近自然色彩基準。", "The image is already close to the natural color baseline."))
+                        .font(.caption2).foregroundStyle(StudioUI.secondary)
+                } else {
+                    Text(suggestion.reasons.map(\.displayName).joined(separator: " · "))
+                        .font(.caption2).foregroundStyle(StudioUI.secondary)
+                }
+                let exposure = String(format: "%+.2f", suggestion.exposureDelta)
+                let temperature = String(format: "%+.0f", suggestion.temperatureDelta)
+                let contrast = String(format: "%+.0f", suggestion.contrastDelta)
+                Text(StudioText.localized(
+                    "建議：曝光 \(exposure) EV、色溫 \(temperature) K、對比 \(contrast)",
+                    "Suggested: Exposure \(exposure) EV, Temp \(temperature) K, Contrast \(contrast)"
+                ))
+                .font(.caption2).foregroundStyle(StudioUI.secondary)
+            }
+        }
+        StudioSection(title: "Scopes", systemImage: "scope", isExpanded: $scopesOpen) {
+            ColorScopesView(snapshot: model.colorScopes)
+                .frame(maxWidth: .infinity)
+            Button(StudioText.localized("更新 scopes", "Refresh Scopes")) {
+                model.refreshColorScopes()
+            }
+            .buttonStyle(.bordered)
+        }
+        StudioSection(title: StudioText.localized("語意遮罩", "Semantic Masks"),
+                      systemImage: "person.crop.rectangle.badge.plus", isExpanded: $semanticOpen) {
+            Text(StudioText.localized(
+                "使用 Vision 與離線色彩模型辨識人物、天空、皮膚與植物，結果會轉成可編輯筆刷。",
+                "Use Vision and offline color models to detect people, sky, skin, and vegetation as editable brushes."
+            ))
+            .font(.caption).foregroundStyle(StudioUI.secondary)
+            Button {
+                model.analyzeSemanticRegions()
+            } label: {
+                Label(model.isAnalyzingSemanticRegions
+                      ? StudioText.localized("分析中…", "Analyzing…")
+                      : StudioText.localized("分析語意區域", "Analyze Regions"),
+                      systemImage: "wand.and.stars")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.preview == nil || model.isAnalyzingSemanticRegions)
+            ForEach(model.semanticRegions) { region in
+                HStack {
+                    Text(region.kind.displayName)
+                    Spacer()
+                    Text("\(Int((region.confidence * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(StudioUI.secondary)
+                    Button(StudioText.localized("建立筆刷", "Create Brush")) {
+                        model.applySemanticRegion(region)
+                    }
+                }
+                .font(.caption)
+            }
+        }
         StudioSection(title: StudioText.basic, systemImage: "slider.horizontal.3", isExpanded: $basicOpen) {
             slider(StudioText.localized("曝光", "Exposure"), $model.adjustments.exposure, -5...5); slider(StudioText.localized("對比", "Contrast"), $model.adjustments.contrast, -100...100); slider(StudioText.localized("亮部", "Highlights"), $model.adjustments.highlights, -100...100); slider(StudioText.localized("暗部", "Shadows"), $model.adjustments.shadows, -100...100); slider(StudioText.localized("白色", "Whites"), $model.adjustments.whites, -100...100); slider(StudioText.localized("黑色", "Blacks"), $model.adjustments.blacks, -100...100)
         }
@@ -880,6 +1002,72 @@ private struct StudioInspector: View {
                 brushBinding(index, keyPath: keyPath, fallback: fallback).wrappedValue = value / scale
             }
         )
+    }
+
+    @ViewBuilder private var colorManagementTab: some View {
+        StudioSection(title: StudioText.localized("參考照片匹配", "Reference Match"),
+                      systemImage: "photo.on.rectangle.angled", isExpanded: $referenceMatchOpen) {
+            Text(StudioText.localized(
+                "選擇一張參考照片，分析曝光、白平衡與色彩分布後產生可復原的建議。",
+                "Choose a reference photo to generate an undoable match for exposure, white balance, and color distribution."
+            ))
+            .font(.caption).foregroundStyle(StudioUI.secondary)
+            Button(StudioText.localized("選擇參考照片…", "Choose Reference Photo…")) {
+                model.matchReferencePhoto()
+            }
+            .buttonStyle(.borderedProminent)
+            if !model.referencePhotoName.isEmpty {
+                Text(StudioText.localized("參考：\(model.referencePhotoName)", "Reference: \(model.referencePhotoName)"))
+                    .font(.caption2).foregroundStyle(StudioUI.secondary)
+            }
+            if let suggestion = model.naturalColorSuggestion {
+                Text(StudioText.localized(
+                    "建議曝光 \(String(format: "%+.2f", suggestion.exposureDelta)) EV、色溫 \(String(format: "%+.0f", suggestion.temperatureDelta)) K、對比 \(String(format: "%+.0f", suggestion.contrastDelta))",
+                    "Suggested Exposure \(String(format: "%+.2f", suggestion.exposureDelta)) EV, Temp \(String(format: "%+.0f", suggestion.temperatureDelta)) K, Contrast \(String(format: "%+.0f", suggestion.contrastDelta))"
+                ))
+                .font(.caption2).foregroundStyle(StudioUI.secondary)
+                HStack {
+                    Button(StudioText.localized("套用匹配", "Apply Match")) {
+                        model.applyNaturalColorSuggestion()
+                    }
+                    .disabled(!suggestion.hasChanges)
+                    Button(StudioText.localized("清除", "Clear")) {
+                        model.clearNaturalColorSuggestion()
+                    }
+                }
+            }
+        }
+        StudioSection(title: StudioText.localized("ColorChecker 校正", "ColorChecker Calibration"),
+                      systemImage: "square.grid.3x3", isExpanded: $colorCheckerOpen) {
+            Text(StudioText.localized(
+                "依序點擊 24 個色卡色塊，建立相機色彩矩陣；校正結果會保存到 sidecar。",
+                "Click the 24 chart patches in order to build a camera color matrix saved in the sidecar."
+            ))
+            .font(.caption).foregroundStyle(StudioUI.secondary)
+            HStack {
+                Button(StudioText.localized("開始取樣", "Start Sampling")) {
+                    model.startColorCheckerCalibration()
+                    localTool = .colorChecker
+                }.buttonStyle(.borderedProminent)
+                Button(StudioText.localized("完成校正", "Finish Calibration")) {
+                    model.finishColorCheckerCalibration()
+                    localTool = .none
+                }
+                .disabled(model.colorCheckerSamples.count < 3)
+            }
+            Text(StudioText.localized(
+                "已取樣 \(model.colorCheckerSamples.count)/24",
+                "Samples \(model.colorCheckerSamples.count)/24"
+            ))
+            .font(.caption2).foregroundStyle(StudioUI.secondary)
+            if let profile = model.colorCheckerProfile {
+                Text(StudioText.localized(
+                    "已套用 \(profile.sampleCount) 個色卡樣本",
+                    "Applied profile from \(profile.sampleCount) chart samples"
+                ))
+                .font(.caption2).foregroundStyle(.green)
+            }
+        }
     }
 
     @ViewBuilder private var presetTab: some View {

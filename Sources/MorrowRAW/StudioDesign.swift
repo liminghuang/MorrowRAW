@@ -36,6 +36,7 @@ enum StudioText {
     static var presets: String { t("預設", "Presets") }
     static var export: String { t("匯出", "Export") }
     static var info: String { t("資訊", "Info") }
+    static var colorManagement: String { t("色彩管理", "Color Management") }
     static var basic: String { t("基本調整", "Basic") }
     static var color: String { t("色彩", "Color") }
     static var detail: String { t("細節", "Detail") }

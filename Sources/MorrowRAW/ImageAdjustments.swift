@@ -26,6 +26,7 @@ struct ImageAdjustments: Equatable {
     var gradients: [LinearGradient] = []
     var adjustmentBrushes: [AdjustmentBrush] = []
     var healSpots: [HealSpot] = []
+    var colorProfileMatrix = ColorCheckerProfile.identityMatrix
     var cachedExif: ExifData?
 
     mutating func load(from url: URL) throws {
@@ -35,6 +36,7 @@ struct ImageAdjustments: Equatable {
         gradients = parser.gradients
         adjustmentBrushes = parser.adjustmentBrushes
         healSpots = parser.healSpots
+        colorProfileMatrix = parser.colorProfileMatrix
         cachedExif = parser.exif
         exposure = parser.number("Exposure", fallback: exposure)
         contrast = parser.number("Contrast", fallback: contrast)
@@ -84,6 +86,14 @@ struct ImageAdjustments: Equatable {
         ]
         for (name, value) in fields {
             values.addChild(XMLElement(name: name, stringValue: value))
+        }
+        if colorProfileMatrix.count == 9,
+           zip(colorProfileMatrix, ColorCheckerProfile.identityMatrix).contains(where: { abs($0 - $1) > 0.000001 }) {
+            let profile = XMLElement(name: "ColorProfile")
+            for (index, value) in colorProfileMatrix.enumerated() {
+                profile.addChild(XMLElement(name: "M\(index / 3)\(index % 3)", stringValue: value.xmlValue))
+            }
+            values.addChild(profile)
         }
         if !gradients.isEmpty {
             let gradientList = XMLElement(name: "Gradients")
@@ -249,12 +259,14 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
     var gradients: [LinearGradient] = []
     var adjustmentBrushes: [AdjustmentBrush] = []
     var healSpots: [HealSpot] = []
+    var colorProfileMatrix = ColorCheckerProfile.identityMatrix
     var exif: ExifData?
     private var text = ""
     private var currentGradient: LinearGradient?
     private var currentAdjustmentBrush: AdjustmentBrush?
     private var currentBrushPoint: AdjustmentBrushPoint?
     private var currentHealSpot: HealSpot?
+    private var currentColorProfile = false
     private var currentExif: ExifData?
 
     func parse(_ data: Data) throws {
@@ -273,6 +285,7 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
         if elementName == "AdjustmentBrush" { currentAdjustmentBrush = AdjustmentBrush() }
         if elementName == "Point" { currentBrushPoint = AdjustmentBrushPoint(x: 0, y: 0) }
         if elementName == "HealSpot" { currentHealSpot = HealSpot() }
+        if elementName == "ColorProfile" { currentColorProfile = true }
         if elementName == "Exif" { currentExif = ExifData() }
     }
 
@@ -284,7 +297,7 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
                 namespaceURI: String?, qualifiedName qName: String?) {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let isStructuredField = currentGradient != nil || currentAdjustmentBrush != nil ||
-            currentBrushPoint != nil || currentHealSpot != nil || currentExif != nil
+            currentBrushPoint != nil || currentHealSpot != nil || currentExif != nil || currentColorProfile
         if var gradient = currentGradient, elementName != "LinearGradient", let number = Double(value) {
             switch elementName {
             case "CenterX": gradient.centerX = number
@@ -361,6 +374,13 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
             healSpots.append(spot)
             currentHealSpot = nil
         }
+        if currentColorProfile, elementName != "ColorProfile", let number = Double(value),
+           elementName.count == 3, elementName.first == "M",
+           let row = Int(String(elementName[elementName.index(after: elementName.startIndex)])),
+           let column = Int(String(elementName.last!)), row < 3, column < 3 {
+            colorProfileMatrix[row * 3 + column] = number
+        }
+        if elementName == "ColorProfile" { currentColorProfile = false }
         if var exif = currentExif, elementName != "Exif" {
             switch elementName {
             case "CameraMake": exif.cameraMake = value

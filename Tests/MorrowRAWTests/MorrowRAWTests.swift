@@ -434,6 +434,153 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotEqual(histogram.red, histogram.blue)
     }
 
+    func testNaturalColorAssistantSuggestsExposureForDarkImage() {
+        let image = CIImage(color: CIColor(red: 0.08, green: 0.08, blue: 0.08))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let preview = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create color assistant fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: preview)
+        XCTAssertGreaterThan(suggestion.exposureDelta, 0)
+        XCTAssertTrue(suggestion.reasons.contains(.exposure))
+        XCTAssertGreaterThan(suggestion.confidence, 0.3)
+    }
+
+    func testColorConstancyEnsembleAgreesOnNeutralImage() {
+        let image = CIImage(color: CIColor(red: 0.45, green: 0.45, blue: 0.45))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let preview = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create color constancy fixture")
+            return
+        }
+        let estimate = ColorConstancyAnalyzer.estimate(for: preview)
+        XCTAssertEqual(estimate.methods.count, 4)
+        XCTAssertLessThan(estimate.agreementDegrees, 20)
+        XCTAssertGreaterThan(estimate.confidence, 0.45)
+        XCTAssertEqual(estimate.correctionGains.x, estimate.correctionGains.z, accuracy: 0.08)
+    }
+
+    func testColorConstancyWarmSceneRequestsBlueChannelCompensation() {
+        let image = CIImage(color: CIColor(red: 0.8, green: 0.42, blue: 0.18))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let preview = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create color constancy fixture")
+            return
+        }
+        let estimate = ColorConstancyAnalyzer.estimate(for: preview)
+        XCTAssertLessThan(estimate.correctionGains.x, estimate.correctionGains.z)
+    }
+
+    func testNaturalColorAssistantDetectsWarmColorCastAndPreservesExistingEdits() {
+        let image = CIImage(color: CIColor(red: 0.8, green: 0.42, blue: 0.18))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let preview = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create color assistant fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: preview)
+        XCTAssertLessThan(suggestion.temperatureDelta, 0)
+        XCTAssertTrue(suggestion.reasons.contains(.whiteBalance))
+
+        var existing = ImageAdjustments()
+        existing.exposure = 0.5
+        existing.sharpening = 24
+        let adjusted = suggestion.applying(to: existing)
+        XCTAssertEqual(adjusted.sharpening, 24)
+        XCTAssertEqual(adjusted.exposure, 0.5 + suggestion.exposureDelta, accuracy: 0.0001)
+    }
+
+    func testColorScopesProduceWaveformVectorscopeAndClippingMetrics() {
+        let image = CIImage(color: CIColor(red: 1, green: 0.1, blue: 0.05))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let preview = ImageRenderer.shared.makePreview(image, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create scope fixture")
+            return
+        }
+        let scopes = ColorScopeCalculator.snapshot(for: preview)
+        XCTAssertEqual(scopes.waveform.count, 128 * 64)
+        XCTAssertEqual(scopes.vectorscope.count, 128 * 128)
+        XCTAssertGreaterThan(scopes.waveform.max() ?? 0, 0)
+        XCTAssertGreaterThan(scopes.vectorscope.max() ?? 0, 0)
+        XCTAssertGreaterThan(scopes.clippedHighlightFraction, 0)
+    }
+
+    func testSemanticMaskAnalyzerFindsSkyLikeRegion() {
+        let context = CGContext(data: nil, width: 64, height: 48,
+                                 bitsPerComponent: 8, bytesPerRow: 0,
+                                 space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.9, alpha: 1))
+        context?.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+        guard let image = context?.makeImage() else {
+            XCTFail("Could not create semantic mask fixture")
+            return
+        }
+        let regions = SemanticMaskAnalyzer.detect(in: image)
+        XCTAssertTrue(regions.contains(where: { $0.kind == .sky }))
+        XCTAssertGreaterThan(regions.first(where: { $0.kind == .sky })?.points.count ?? 0, 3)
+    }
+
+    func testColorCheckerCalibrationSolvesIdentityMatrix() {
+        let samples = [
+            ColorCheckerSample(measured: SIMD3(1, 0, 0), reference: SIMD3(1, 0, 0)),
+            ColorCheckerSample(measured: SIMD3(0, 1, 0), reference: SIMD3(0, 1, 0)),
+            ColorCheckerSample(measured: SIMD3(0, 0, 1), reference: SIMD3(0, 0, 1))
+        ]
+        guard let profile = ColorCheckerProfile.calibrate(samples: samples) else {
+            XCTFail("Could not solve ColorChecker profile")
+            return
+        }
+        XCTAssertEqual(profile.matrix, ColorCheckerProfile.identityMatrix)
+        XCTAssertEqual(profile.sampleCount, 3)
+    }
+
+    func testColorProfileMatrixPersistsInSidecar() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-raw-color-profile-\(UUID().uuidString).xml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var original = ImageAdjustments()
+        original.colorProfileMatrix = [0.98, 0.01, 0.02,
+                                       0.02, 1.01, -0.01,
+                                       0.00, 0.03, 0.96]
+        try original.save(to: url)
+        var restored = ImageAdjustments()
+        try restored.load(from: url)
+        XCTAssertEqual(restored.colorProfileMatrix, original.colorProfileMatrix)
+    }
+
+    func testReferenceColorMatcherSuggestsDifferenceFromReference() {
+        let source = CIImage(color: CIColor(red: 0.15, green: 0.15, blue: 0.15))
+            .cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
+        let reference = CIImage(color: CIColor(red: 0.55, green: 0.55, blue: 0.55))
+            .cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
+        guard let sourceImage = ImageRenderer.shared.makePreview(source, adjustments: ImageAdjustments()),
+              let referenceImage = ImageRenderer.shared.makePreview(reference, adjustments: ImageAdjustments()) else {
+            XCTFail("Could not create reference match fixture")
+            return
+        }
+        let suggestion = ReferenceColorMatcher.suggestion(source: sourceImage, reference: referenceImage)
+        XCTAssertGreaterThan(suggestion.exposureDelta, 0)
+        XCTAssertTrue(suggestion.reasons.contains(.exposure))
+    }
+
+    func testRendererAppliesColorProfileMatrix() {
+        let source = CIImage(color: CIColor(red: 0.9, green: 0.1, blue: 0.05))
+            .cropped(to: CGRect(x: 0, y: 0, width: 24, height: 16))
+        var adjustments = ImageAdjustments()
+        adjustments.colorProfileMatrix = [0, 0, 1,
+                                           0, 1, 0,
+                                           1, 0, 0]
+        guard let rendered = ImageRenderer.shared.makePreview(source, adjustments: adjustments),
+              let data = rendered.dataProvider?.data else {
+            XCTFail("Could not render color profile fixture")
+            return
+        }
+        let bytes = CFDataGetBytePtr(data)!
+        XCTAssertGreaterThan(bytes[2], bytes[0])
+    }
+
     func testHistogramDownsamplesLargeImagesBeforeAnalysis() {
         guard let context = CGContext(data: nil, width: 2048, height: 1024,
                                       bitsPerComponent: 8, bytesPerRow: 0,

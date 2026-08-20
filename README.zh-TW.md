@@ -11,6 +11,8 @@ Morrow RAW 是使用 SwiftUI、Core Image 與 Metal 開發的原生 macOS RAW �
   調整檔。
 - 非破壞式編輯：曝光與色調控制、白平衡取樣、裁切／旋轉、漸層遮罩、修補點、
   preset，以及可拖曳分割線的 Before/After 對照。
+- Morrow Natural Color Assistant：可解釋的裝置端色彩建議、waveform／vectorscope／
+  clipping scopes、Vision 語意遮罩、ColorChecker 相機校正，以及參考照片匹配。
 - 大型資料夾批次處理：可取消、逐步顯示進度、每張照片獨立套用調整、保留
   metadata，並支援 JPEG／PNG／TIFF／BMP 匯出。
 - Apple Silicon 渲染路徑：非同步 Metal 處理、共用 texture pool、限制 GPU

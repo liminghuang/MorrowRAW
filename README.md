@@ -13,6 +13,9 @@ non-destructive workflow for browsing, editing, and exporting camera RAW files.
 - Non-destructive editing with exposure and tonal controls, white-balance
   sampling, crop/rotation, gradient masks, healing points, presets, and
   Before/After comparison.
+- Morrow Natural Color Assistant with explainable on-device color suggestions,
+  waveform/vectorscope/clipping scopes, Vision-assisted semantic masks,
+  ColorChecker camera calibration, and reference-photo matching.
 - Batch editing and export for large folders, with cancellation, incremental
   progress, per-photo adjustments, metadata preservation, and JPEG/PNG/TIFF/BMP
   output.
