@@ -801,9 +801,12 @@ final class ImageRenderer {
                                                    cost: refined.bytesPerRow * refined.height)
                 }
                 if let refined {
-                finalMask = CIImage(cgImage: refined)
+                    let restored = GuidedMaskRefiner.resized(
+                        refined, width: max(1, Int(extent.width)), height: max(1, Int(extent.height))
+                    ) ?? refined
+                    finalMask = CIImage(cgImage: restored)
                         .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
-                    .cropped(to: extent)
+                        .cropped(to: extent)
                 } else {
                     finalMask = mask
                 }

@@ -66,19 +66,25 @@ kernel void guidedMaskCoefficients(texture2d<half, access::read> mask [[texture(
     const int2 center = int2(gid);
     const int radius = int(uniforms.radius);
     float meanMask = 0.0;
-    float meanGuide = 0.0;
-    float meanGuideSquared = 0.0;
-    float meanGuideMask = 0.0;
+    float3 meanGuide = float3(0.0);
+    float3 meanGuideSquared = float3(0.0);
+    float3 meanGuideMask = float3(0.0);
+    float meanRG = 0.0;
+    float meanRB = 0.0;
+    float meanGB = 0.0;
     float count = 0.0;
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
             const int2 point = clampedPoint(center + int2(x, y), maximum);
             const float maskValue = guidedMaskValue(mask, point);
-            const float guideValue = guidedLuma(guide, point);
+            const float3 guideValue = float3(guide.read(uint2(point)).rgb);
             meanMask += maskValue;
             meanGuide += guideValue;
             meanGuideSquared += guideValue * guideValue;
             meanGuideMask += guideValue * maskValue;
+            meanRG += guideValue.r * guideValue.g;
+            meanRB += guideValue.r * guideValue.b;
+            meanGB += guideValue.g * guideValue.b;
             count += 1.0;
         }
     }
@@ -86,11 +92,34 @@ kernel void guidedMaskCoefficients(texture2d<half, access::read> mask [[texture(
     meanGuide /= count;
     meanGuideSquared /= count;
     meanGuideMask /= count;
-    const float variance = max(0.0, meanGuideSquared - meanGuide * meanGuide);
-    const float covariance = meanGuideMask - meanGuide * meanMask;
-    const float coefficient = covariance / (variance + uniforms.epsilon);
-    const float intercept = meanMask - coefficient * meanGuide;
-    coefficients.write(half4(half(coefficient), half(intercept), 0.0h, 1.0h), gid);
+    meanRG /= count;
+    meanRB /= count;
+    meanGB /= count;
+    const float a00 = meanGuideSquared.r - meanGuide.r * meanGuide.r + uniforms.epsilon;
+    const float a01 = meanRG - meanGuide.r * meanGuide.g;
+    const float a02 = meanRB - meanGuide.r * meanGuide.b;
+    const float a11 = meanGuideSquared.g - meanGuide.g * meanGuide.g + uniforms.epsilon;
+    const float a12 = meanGB - meanGuide.g * meanGuide.b;
+    const float a22 = meanGuideSquared.b - meanGuide.b * meanGuide.b + uniforms.epsilon;
+    const float v0 = meanGuideMask.r - meanGuide.r * meanMask;
+    const float v1 = meanGuideMask.g - meanGuide.g * meanMask;
+    const float v2 = meanGuideMask.b - meanGuide.b * meanMask;
+    const float determinant = a00 * (a11 * a22 - a12 * a12)
+        - a01 * (a01 * a22 - a12 * a02)
+        + a02 * (a01 * a12 - a11 * a02);
+    const float safeDeterminant = abs(determinant) > 0.000001 ? determinant : 1.0;
+    const float coefficientR = (v0 * (a11 * a22 - a12 * a12)
+        - a01 * (v1 * a22 - a12 * v2)
+        + a02 * (v1 * a12 - a11 * v2)) / safeDeterminant;
+    const float coefficientG = (a00 * (v1 * a22 - a12 * v2)
+        - v0 * (a01 * a22 - a12 * a02)
+        + a02 * (a01 * v2 - v1 * a02)) / safeDeterminant;
+    const float coefficientB = (a00 * (a11 * v2 - v1 * a12)
+        - a01 * (a01 * v2 - v1 * a02)
+        + v0 * (a01 * a12 - a11 * a02)) / safeDeterminant;
+    const float intercept = meanMask - coefficientR * meanGuide.r
+        - coefficientG * meanGuide.g - coefficientB * meanGuide.b;
+    coefficients.write(half4(half(coefficientR), half(coefficientG), half(coefficientB), half(intercept)), gid);
 }
 
 kernel void guidedMaskOutput(texture2d<half, access::read> guide [[texture(0)]],
@@ -102,21 +131,22 @@ kernel void guidedMaskOutput(texture2d<half, access::read> guide [[texture(0)]],
     const int2 maximum = int2(output.get_width() - 1, output.get_height() - 1);
     const int2 center = int2(gid);
     const int radius = int(uniforms.radius);
-    float meanCoefficient = 0.0;
+    float3 meanCoefficient = float3(0.0);
     float meanIntercept = 0.0;
     float count = 0.0;
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
             const int2 point = clampedPoint(center + int2(x, y), maximum);
             const half4 value = coefficients.read(uint2(point));
-            meanCoefficient += float(value.r);
-            meanIntercept += float(value.g);
+            meanCoefficient += float3(value.rgb);
+            meanIntercept += float(value.a);
             count += 1.0;
         }
     }
     meanCoefficient /= count;
     meanIntercept /= count;
-    const float result = clamp(meanCoefficient * guidedLuma(guide, center) + meanIntercept,
+    const float3 guideValue = float3(guide.read(uint2(center)).rgb);
+    const float result = clamp(dot(meanCoefficient, guideValue) + meanIntercept,
                                0.0, 1.0);
     output.write(half4(half(result), half(result), half(result), 1.0h), gid);
 }
