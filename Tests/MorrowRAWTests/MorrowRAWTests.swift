@@ -1737,6 +1737,71 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertTrue((0..<byteCount).contains { originalBytes[$0] != poissonBytes[$0] })
     }
 
+    func testMetalLabChromaStaysWithinCPUReferenceErrorBudget() throws {
+        try XCTSkipUnless(MetalImageProcessor.shared.isAvailable,
+                          "Metal color pipelines are unavailable in this test environment")
+        let gradient = CIFilter.linearGradient()
+        gradient.point0 = CGPoint(x: 0, y: 0)
+        gradient.point1 = CGPoint(x: 32, y: 24)
+        gradient.color0 = CIColor(red: 0.08, green: 0.18, blue: 0.72)
+        gradient.color1 = CIColor(red: 0.92, green: 0.66, blue: 0.12)
+        let source = gradient.outputImage!.cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
+        let context = CIContext()
+        guard let sourceImage = context.createCGImage(source, from: source.extent),
+              let cpu = CIELabColorAdjustment.adjust(sourceImage, saturation: 0.55, vibrance: 0.25),
+              let gpu = MetalImageProcessor.shared.labChroma(source, saturation: 0.55,
+                                                             vibrance: 0.25, context: context),
+              let gpuImage = context.createCGImage(gpu, from: gpu.extent) else {
+            XCTFail("Could not produce CPU/GPU Lab reference images")
+            return
+        }
+        XCTAssertLessThan(meanAbsoluteByteError(cpu, gpuImage), 24)
+    }
+
+    func testMetalGuidedMaskStaysWithinCPUReferenceErrorBudget() throws {
+        try XCTSkipUnless(MetalImageProcessor.shared.guidedMaskIsAvailable,
+                          "Metal guided-mask pipelines are unavailable in this test environment")
+        let guide = CIFilter.linearGradient()
+        guide.point0 = CGPoint(x: 0, y: 0)
+        guide.point1 = CGPoint(x: 32, y: 24)
+        guide.color0 = CIColor(red: 0.08, green: 0.12, blue: 0.18)
+        guide.color1 = CIColor(red: 0.92, green: 0.75, blue: 0.48)
+        let guideImage = guide.outputImage!.cropped(to: CGRect(x: 0, y: 0, width: 32, height: 24))
+        let maskImage = CIFilter.radialGradient()
+        maskImage.center = CGPoint(x: 16, y: 12)
+        maskImage.radius0 = 4
+        maskImage.radius1 = 14
+        maskImage.color0 = CIColor.white
+        maskImage.color1 = CIColor.black
+        let mask = maskImage.outputImage!.cropped(to: guideImage.extent)
+        let context = CIContext()
+        guard let maskCG = context.createCGImage(mask, from: mask.extent),
+              let guideCG = context.createCGImage(guideImage, from: guideImage.extent),
+              let cpu = GuidedMaskRefiner.refine(mask: maskCG, guide: guideCG),
+              let gpu = MetalImageProcessor.shared.guidedMask(mask: mask, guide: guideImage,
+                                                               radius: 4, context: context),
+              let gpuCG = context.createCGImage(gpu, from: gpu.extent) else {
+            XCTFail("Could not produce CPU/GPU guided-mask reference images")
+            return
+        }
+        XCTAssertLessThan(meanAbsoluteByteError(cpu, gpuCG), 20)
+    }
+
+    private func meanAbsoluteByteError(_ lhs: CGImage, _ rhs: CGImage) -> Double {
+        guard lhs.width == rhs.width, lhs.height == rhs.height,
+              let lhsData = lhs.dataProvider?.data,
+              let rhsData = rhs.dataProvider?.data,
+              let lhsBytes = CFDataGetBytePtr(lhsData),
+              let rhsBytes = CFDataGetBytePtr(rhsData) else { return .greatestFiniteMagnitude }
+        let count = min(lhs.bytesPerRow * lhs.height, rhs.bytesPerRow * rhs.height)
+        guard count > 0 else { return 0 }
+        var total = 0.0
+        for index in 0..<count {
+            total += abs(Double(lhsBytes[index]) - Double(rhsBytes[index]))
+        }
+        return total / Double(count)
+    }
+
     func testAsyncMetalPreviewPipelineCompletesRepairWithoutBlockingWait() async {
         let gradient = CIFilter.linearGradient()
         gradient.point0 = CGPoint(x: 0, y: 0)

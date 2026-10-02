@@ -17,6 +17,10 @@ final class MetalImageProcessor {
             teleaPipeline != nil && poissonPipeline != nil
     }
 
+    var guidedMaskIsAvailable: Bool {
+        guidedCoefficientsPipeline != nil && guidedOutputPipeline != nil
+    }
+
     private final class TexturePool {
         private let device: MTLDevice
         private let maxCachedTextures = 16
