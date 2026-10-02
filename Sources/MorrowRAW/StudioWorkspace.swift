@@ -250,6 +250,17 @@ private struct StudioCanvas: View {
                     .offset(panOffset)
                     .padding(28)
             } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
+            if !model.semanticBrushRegionIDs.isEmpty {
+                GeometryReader { geometry in
+                    SemanticRegionOutlineOverlay(
+                        regions: model.semanticRegions.filter {
+                            model.semanticBrushRegionIDs.contains($0.id)
+                        },
+                        size: geometry.size
+                    )
+                }
+                .allowsHitTesting(false)
+            }
             VStack {
                 if model.isLoadingFolder {
                     HStack(spacing: 10) {
