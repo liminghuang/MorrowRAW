@@ -245,30 +245,31 @@ private struct StudioCanvas: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(28)
             } else if let preview = model.preview {
-                GeometryReader { geometry in
-                    ZStack(alignment: .topLeading) {
-                        Image(nsImage: preview)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
-                            ? model.semanticRegions : model.activeSemanticBrushRegions
-                        if !visibleSemanticRegions.isEmpty {
-                            SemanticRegionOutlineOverlay(regions: visibleSemanticRegions,
-                                                         size: geometry.size)
-                            Text(StudioText.localized(
-                                "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
-                                "Semantic regions: \(visibleSemanticRegions.count) shown"
-                            ))
-                            .font(.caption.bold())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 9).padding(.vertical, 6)
-                            .background(.black.opacity(0.78), in: Capsule())
-                            .padding(12)
+                let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
+                    ? model.semanticRegions : model.activeSemanticBrushRegions
+                Image(nsImage: preview)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay {
+                        GeometryReader { geometry in
+                            if !visibleSemanticRegions.isEmpty {
+                                SemanticRegionOutlineOverlay(regions: visibleSemanticRegions,
+                                                             size: geometry.size)
+                                Text(StudioText.localized(
+                                    "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
+                                    "Semantic regions: \(visibleSemanticRegions.count) shown"
+                                ))
+                                .font(.caption.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 9).padding(.vertical, 6)
+                                .background(.black.opacity(0.78), in: Capsule())
+                                .padding(12)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                       alignment: .topLeading)
+                            }
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .scaleEffect(model.zoomScale)
                 .offset(panOffset)
                 .padding(28)
