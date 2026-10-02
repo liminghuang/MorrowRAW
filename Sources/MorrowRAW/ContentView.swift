@@ -1087,8 +1087,8 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
             let result = await Task.detached(priority: .userInitiated) {
                 let progress: @Sendable (Int, Int) -> Void = { completed, total in
                     guard progressGate.shouldPublish(completed: completed, total: total) else { return }
-                    Task { @MainActor [weak progressTarget] in
-                        guard let progressTarget, progressTarget.isBatchAdjusting else { return }
+                    Task { @MainActor in
+                        guard progressTarget.isBatchAdjusting else { return }
                         progressTarget.batchAdjustmentCompleted = completed
                         progressTarget.batchAdjustmentTotal = total
                     }
@@ -1256,6 +1256,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         var brush = AdjustmentBrush(points: region.points)
         brush.radiusNorm = 0.045
         brush.feather = 0.8
+        brush.guidedRefinement = true
         adjustments.adjustmentBrushes.append(brush)
         scheduleRender()
     }

@@ -56,6 +56,30 @@ struct NaturalColorSuggestion: Equatable {
     let constancyAgreementDegrees: Double
     let constancyMethods: [String]
 
+    var plan: NaturalColorPlan {
+        NaturalColorPlan(
+            observations: [
+                "average_luminance": analysis.averageLuminance,
+                "median_luminance": analysis.medianLuminance,
+                "shadow_luminance": analysis.shadowLuminance,
+                "highlight_luminance": analysis.highlightLuminance,
+                "clipped_shadow_fraction": analysis.clippedShadowFraction,
+                "clipped_highlight_fraction": analysis.clippedHighlightFraction,
+                "average_saturation": analysis.averageSaturation,
+                "constancy_confidence": constancyConfidence,
+                "constancy_agreement_degrees": constancyAgreementDegrees
+            ],
+            exposureDelta: exposureDelta,
+            contrastDelta: contrastDelta,
+            temperatureDelta: temperatureDelta,
+            tintDelta: tintDelta,
+            vibranceDelta: vibranceDelta,
+            saturationDelta: saturationDelta,
+            confidence: confidence,
+            estimatorMethods: constancyMethods
+        )
+    }
+
     var hasChanges: Bool {
         abs(exposureDelta) > 0.01 || abs(contrastDelta) > 0.1 ||
         abs(temperatureDelta) > 1 || abs(tintDelta) > 0.1 ||
@@ -72,6 +96,41 @@ struct NaturalColorSuggestion: Equatable {
         result.vibrance = min(100, max(-100, source.vibrance + vibranceDelta * amount))
         result.saturation = min(100, max(-100, source.saturation + saturationDelta * amount))
         return result
+    }
+}
+
+struct NaturalColorPlan: Codable, Equatable {
+    let schemaVersion: Int
+    let observations: [String: Double]
+    let exposureDelta: Double
+    let contrastDelta: Double
+    let temperatureDelta: Double
+    let tintDelta: Double
+    let vibranceDelta: Double
+    let saturationDelta: Double
+    let confidence: Double
+    let estimatorMethods: [String]
+
+    init(schemaVersion: Int = 1,
+         observations: [String: Double],
+         exposureDelta: Double,
+         contrastDelta: Double,
+         temperatureDelta: Double,
+         tintDelta: Double,
+         vibranceDelta: Double,
+         saturationDelta: Double,
+         confidence: Double,
+         estimatorMethods: [String]) {
+        self.schemaVersion = schemaVersion
+        self.observations = observations
+        self.exposureDelta = exposureDelta
+        self.contrastDelta = contrastDelta
+        self.temperatureDelta = temperatureDelta
+        self.tintDelta = tintDelta
+        self.vibranceDelta = vibranceDelta
+        self.saturationDelta = saturationDelta
+        self.confidence = confidence
+        self.estimatorMethods = estimatorMethods
     }
 }
 

@@ -11,6 +11,12 @@ import simd
 final class MetalImageProcessor {
     static let shared = MetalImageProcessor()
 
+    var isAvailable: Bool {
+        device != nil && commandQueue != nil && nlmPipeline != nil &&
+            labPipeline != nil && distortionPipeline != nil &&
+            teleaPipeline != nil && poissonPipeline != nil
+    }
+
     private final class TexturePool {
         private let device: MTLDevice
         private let maxCachedTextures = 16

@@ -43,6 +43,12 @@ final class ImageRenderer {
         .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any
     ])
 
+    private static let exposureCubeCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.countLimit = 32
+        return cache
+    }()
+
     private let context: CIContext
 
     init() {
@@ -87,7 +93,7 @@ final class ImageRenderer {
         }
 
         if !adjustments.adjustmentBrushes.isEmpty {
-            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes)
+            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes, quality: quality)
         }
 
         if !adjustments.healSpots.isEmpty {
@@ -114,6 +120,12 @@ final class ImageRenderer {
         return output
     }
 
+    func renderCGImage(_ image: CIImage, adjustments: ImageAdjustments,
+                       quality: RenderQuality = .export) -> CGImage? {
+        let output = render(image, adjustments: adjustments, quality: quality)
+        return createCGImage(output, from: output.extent)
+    }
+
     /// Asynchronous preview pipeline. Core Image graph construction remains
     /// cheap and synchronous; Metal stages suspend until their command buffer
     /// completion instead of blocking a worker on `waitUntilCompleted()`.
@@ -122,10 +134,7 @@ final class ImageRenderer {
         var output = applyColorProfile(to: image, matrix: adjustments.colorProfileMatrix)
 
         if adjustments.exposure != 0 {
-            let filter = CIFilter.exposureAdjust()
-            filter.inputImage = output
-            filter.ev = Float(adjustments.exposure)
-            output = filter.outputImage ?? output
+            output = applyLuminanceExposureProtection(to: output, exposure: adjustments.exposure)
         }
         if adjustments.temperature != 5200 || adjustments.tint != 0 {
             let filter = CIFilter.temperatureAndTint()
@@ -184,7 +193,7 @@ final class ImageRenderer {
             output = applyGradients(to: output, gradients: adjustments.gradients)
         }
         if !adjustments.adjustmentBrushes.isEmpty {
-            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes)
+            output = applyAdjustmentBrushes(to: output, brushes: adjustments.adjustmentBrushes, quality: quality)
         }
         if !adjustments.healSpots.isEmpty {
             output = await applyHealSpotsAsync(to: output, spots: adjustments.healSpots, quality: quality)
@@ -220,14 +229,49 @@ final class ImageRenderer {
         return filter.outputImage ?? image
     }
 
+    private func applyLuminanceExposureProtection(to image: CIImage, exposure: Double) -> CIImage {
+        guard abs(exposure) > 0.000001 else { return image }
+        let dimension = 32
+        let key = String(format: "%.5f", locale: Locale(identifier: "en_US_POSIX"), exposure) as NSString
+        let cubeData: Data
+        if let cached = Self.exposureCubeCache.object(forKey: key) {
+            cubeData = Data(cached)
+        } else {
+            var cube = [Float]()
+            cube.reserveCapacity(dimension * dimension * dimension * 4)
+            for blueIndex in 0..<dimension {
+                for greenIndex in 0..<dimension {
+                    for redIndex in 0..<dimension {
+                        let red = Double(redIndex) / Double(dimension - 1)
+                        let green = Double(greenIndex) / Double(dimension - 1)
+                        let blue = Double(blueIndex) / Double(dimension - 1)
+                        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                        let adjusted = LuminanceExposureProtection.outputLuminance(
+                            luminance, exposure: exposure
+                        )
+                        let ratio = luminance > 0.000001 ? adjusted / luminance : 1
+                        cube.append(Float(min(1, max(0, red * ratio))))
+                        cube.append(Float(min(1, max(0, green * ratio))))
+                        cube.append(Float(min(1, max(0, blue * ratio))))
+                        cube.append(1)
+                    }
+                }
+            }
+            cubeData = Data(bytes: cube, count: cube.count * MemoryLayout<Float>.size)
+            Self.exposureCubeCache.setObject(cubeData as NSData, forKey: key)
+        }
+        let filter = CIFilter(name: "CIColorCube")
+        filter?.setValue(image, forKey: kCIInputImageKey)
+        filter?.setValue(dimension, forKey: "inputCubeDimension")
+        filter?.setValue(cubeData, forKey: "inputCubeData")
+        return filter?.outputImage ?? image
+    }
+
     private func applyBasicAdjustments(to image: CIImage, adjustments: ImageAdjustments,
                                        usePerceptualColor: Bool = true) -> CIImage {
         var output = image
         if adjustments.exposure != 0 {
-            let filter = CIFilter.exposureAdjust()
-            filter.inputImage = output
-            filter.ev = Float(adjustments.exposure)
-            output = filter.outputImage ?? output
+            output = applyLuminanceExposureProtection(to: output, exposure: adjustments.exposure)
         }
         if adjustments.temperature != 5200 || adjustments.tint != 0 {
             let filter = CIFilter.temperatureAndTint()
@@ -634,10 +678,7 @@ final class ImageRenderer {
 
             var adjusted = output
             if gradient.exposure != 0 {
-                let exposure = CIFilter.exposureAdjust()
-                exposure.inputImage = adjusted
-                exposure.ev = Float(gradient.exposure)
-                adjusted = exposure.outputImage ?? adjusted
+                adjusted = applyLuminanceExposureProtection(to: adjusted, exposure: gradient.exposure)
             }
             if gradient.contrast != 0 || gradient.saturation != 0 {
                 let controls = CIFilter.colorControls()
@@ -662,7 +703,8 @@ final class ImageRenderer {
     }
 
     private func applyAdjustmentBrushes(to image: CIImage,
-                                        brushes: [AdjustmentBrush]) -> CIImage {
+                                        brushes: [AdjustmentBrush],
+                                        quality: RenderQuality) -> CIImage {
         let extent = image.extent
         let maxDimension = max(extent.width, extent.height)
         var output = image
@@ -699,10 +741,21 @@ final class ImageRenderer {
             guard let mask else { continue }
             let base = output.cropped(to: extent)
             let adjusted = applyLocalBasicAdjustments(to: base, brush: brush).cropped(to: extent)
+            let finalMask: CIImage
+            if brush.guidedRefinement, quality != .interactive,
+               let maskImage = createCGImage(mask, from: extent),
+               let guideImage = createCGImage(base, from: extent),
+               let refined = GuidedMaskRefiner.refine(mask: maskImage, guide: guideImage) {
+                finalMask = CIImage(cgImage: refined)
+                    .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+                    .cropped(to: extent)
+            } else {
+                finalMask = mask
+            }
             let blend = CIFilter.blendWithMask()
             blend.inputImage = adjusted
             blend.backgroundImage = base
-            blend.maskImage = mask
+            blend.maskImage = finalMask
             output = blend.outputImage?.cropped(to: extent) ?? base
         }
         return output

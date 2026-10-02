@@ -127,7 +127,8 @@ struct ImageAdjustments: Equatable {
                     ("Temperature", brush.temperature.xmlValue),
                     ("Tint", brush.tint.xmlValue),
                     ("Vibrance", brush.vibrance.xmlValue),
-                    ("Saturation", brush.saturation.xmlValue)
+                    ("Saturation", brush.saturation.xmlValue),
+                    ("GuidedRefinement", brush.guidedRefinement ? "true" : "false")
                 ]
                 for (name, value) in fields { node.addChild(XMLElement(name: name, stringValue: value)) }
                 let points = XMLElement(name: "Points")
@@ -215,6 +216,7 @@ struct AdjustmentBrush: Equatable {
     var tint = 0.0
     var vibrance = 0.0
     var saturation = 0.0
+    var guidedRefinement = false
 }
 
 struct HealSpot: Equatable {
@@ -349,6 +351,10 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
             case "Saturation": brush.saturation = number
             default: break
             }
+            currentAdjustmentBrush = brush
+        }
+        if var brush = currentAdjustmentBrush, elementName == "GuidedRefinement" {
+            brush.guidedRefinement = value.lowercased() == "true"
             currentAdjustmentBrush = brush
         }
         if elementName == "AdjustmentBrush", let brush = currentAdjustmentBrush {

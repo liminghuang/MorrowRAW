@@ -102,11 +102,6 @@ enum WatermarkColor: String, CaseIterable, Identifiable, Codable {
 }
 
 final class ImageExporter {
-    private let context = CIContext(options: [
-        .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB) as Any,
-        .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any
-    ])
-
     func exportJPEG(source: CIImage, adjustments: ImageAdjustments,
                     to url: URL, quality: CGFloat = 0.92,
                     maxLongEdge: Int? = nil, sourceURL: URL? = nil,
@@ -125,8 +120,7 @@ final class ImageExporter {
                 dpi: CGFloat = 300,
                 preserveMetadata: Bool = true,
                 watermark: WatermarkSettings = WatermarkSettings()) throws {
-        let output = ImageRenderer.shared.render(source, adjustments: adjustments)
-        guard let renderedImage = context.createCGImage(output, from: output.extent) else {
+        guard let renderedImage = ImageRenderer.shared.renderCGImage(source, adjustments: adjustments) else {
             throw ImageExporterError.cannotRender
         }
         let watermarked = watermark.enabled ? applyWatermark(to: renderedImage, settings: watermark) : renderedImage

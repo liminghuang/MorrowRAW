@@ -1,6 +1,7 @@
 import Foundation
 import CoreImage
 import ImageIO
+import Metal
 import XCTest
 @testable import MorrowRAW
 
@@ -85,6 +86,10 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(suggestion.constancyMethods.count, 5)
         XCTAssertLessThan(suggestion.temperatureDelta, 0)
         XCTAssertTrue(suggestion.reasons.contains(.whiteBalance))
+        let plan = suggestion.plan
+        let restored = try? JSONDecoder().decode(NaturalColorPlan.self,
+                                                   from: JSONEncoder().encode(plan))
+        XCTAssertEqual(restored, plan)
     }
 
     func testAdjustmentSliderRangesFavorFineControlWithoutChangingPersistedDomain() {
@@ -557,6 +562,17 @@ final class CompatibilityTests: XCTestCase {
         let regions = SemanticMaskAnalyzer.detect(in: image)
         XCTAssertTrue(regions.contains(where: { $0.kind == .sky }))
         XCTAssertGreaterThan(regions.first(where: { $0.kind == .sky })?.points.count ?? 0, 3)
+    }
+
+    func testGuidedMaskRefinerPreservesMaskDimensions() {
+        guard let guide = solidCGImage(red: 0.2, green: 0.5, blue: 0.8, width: 48, height: 32),
+              let mask = solidCGImage(red: 0.6, green: 0.6, blue: 0.6, width: 48, height: 32),
+              let refined = GuidedMaskRefiner.refine(mask: mask, guide: guide) else {
+            XCTFail("Could not refine guided mask fixture")
+            return
+        }
+        XCTAssertEqual(refined.width, 48)
+        XCTAssertEqual(refined.height, 32)
     }
 
     func testColorCheckerCalibrationSolvesIdentityMatrix() {
@@ -1568,7 +1584,9 @@ final class CompatibilityTests: XCTestCase {
                           originalBytes[10 * original.bytesPerRow + 20 * 4])
     }
 
-    func testAppleGPUKernelsCanProcessPreviewTextures() {
+    func testAppleGPUKernelsCanProcessPreviewTextures() throws {
+        try XCTSkipUnless(MetalImageProcessor.shared.isAvailable,
+                          "Metal repair pipelines are unavailable in this test environment")
         let gradient = CIFilter.linearGradient()
         gradient.point0 = CGPoint(x: 0, y: 0)
         gradient.point1 = CGPoint(x: 32, y: 24)
@@ -1737,7 +1755,9 @@ final class CompatibilityTests: XCTestCase {
         await gate.release()
     }
 
-    func testMetalRepairPerformanceAndMemoryBudget() {
+    func testMetalRepairPerformanceAndMemoryBudget() throws {
+        try XCTSkipUnless(MetalImageProcessor.shared.isAvailable,
+                          "Metal repair pipelines are unavailable in this test environment")
         let gradient = CIFilter.linearGradient()
         gradient.point0 = CGPoint(x: 0, y: 0)
         gradient.point1 = CGPoint(x: 128, y: 128)
