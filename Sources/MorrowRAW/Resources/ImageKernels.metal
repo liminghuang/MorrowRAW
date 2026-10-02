@@ -35,12 +35,90 @@ struct PoissonUniforms {
     uint iterations;
 };
 
+struct GuidedUniforms {
+    uint radius;
+    float epsilon;
+};
+
 inline float pixelLuma(float3 rgb) {
     return dot(rgb, float3(0.2126, 0.7152, 0.0722));
 }
 
 inline int2 clampedPoint(int2 point, int2 maximum) {
     return clamp(point, int2(0), maximum);
+}
+
+inline float guidedMaskValue(texture2d<half, access::read> mask, int2 point) {
+    return float(mask.read(uint2(point)).r);
+}
+
+inline float guidedLuma(texture2d<half, access::read> guide, int2 point) {
+    return pixelLuma(float3(guide.read(uint2(point)).rgb));
+}
+
+kernel void guidedMaskCoefficients(texture2d<half, access::read> mask [[texture(0)]],
+                                   texture2d<half, access::read> guide [[texture(1)]],
+                                   texture2d<half, access::write> coefficients [[texture(2)]],
+                                   constant GuidedUniforms& uniforms [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= coefficients.get_width() || gid.y >= coefficients.get_height()) return;
+    const int2 maximum = int2(coefficients.get_width() - 1, coefficients.get_height() - 1);
+    const int2 center = int2(gid);
+    const int radius = int(uniforms.radius);
+    float meanMask = 0.0;
+    float meanGuide = 0.0;
+    float meanGuideSquared = 0.0;
+    float meanGuideMask = 0.0;
+    float count = 0.0;
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            const int2 point = clampedPoint(center + int2(x, y), maximum);
+            const float maskValue = guidedMaskValue(mask, point);
+            const float guideValue = guidedLuma(guide, point);
+            meanMask += maskValue;
+            meanGuide += guideValue;
+            meanGuideSquared += guideValue * guideValue;
+            meanGuideMask += guideValue * maskValue;
+            count += 1.0;
+        }
+    }
+    meanMask /= count;
+    meanGuide /= count;
+    meanGuideSquared /= count;
+    meanGuideMask /= count;
+    const float variance = max(0.0, meanGuideSquared - meanGuide * meanGuide);
+    const float covariance = meanGuideMask - meanGuide * meanMask;
+    const float coefficient = covariance / (variance + uniforms.epsilon);
+    const float intercept = meanMask - coefficient * meanGuide;
+    coefficients.write(half4(half(coefficient), half(intercept), 0.0h, 1.0h), gid);
+}
+
+kernel void guidedMaskOutput(texture2d<half, access::read> guide [[texture(0)]],
+                             texture2d<half, access::read> coefficients [[texture(1)]],
+                             texture2d<half, access::write> output [[texture(2)]],
+                             constant GuidedUniforms& uniforms [[buffer(0)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+    const int2 maximum = int2(output.get_width() - 1, output.get_height() - 1);
+    const int2 center = int2(gid);
+    const int radius = int(uniforms.radius);
+    float meanCoefficient = 0.0;
+    float meanIntercept = 0.0;
+    float count = 0.0;
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            const int2 point = clampedPoint(center + int2(x, y), maximum);
+            const half4 value = coefficients.read(uint2(point));
+            meanCoefficient += float(value.r);
+            meanIntercept += float(value.g);
+            count += 1.0;
+        }
+    }
+    meanCoefficient /= count;
+    meanIntercept /= count;
+    const float result = clamp(meanCoefficient * guidedLuma(guide, center) + meanIntercept,
+                               0.0, 1.0);
+    output.write(half4(half(result), half(result), half(result), 1.0h), gid);
 }
 
 kernel void nonLocalMeans(texture2d<half, access::read> input [[texture(0)]],

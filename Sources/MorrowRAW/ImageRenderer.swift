@@ -49,6 +49,13 @@ final class ImageRenderer {
         return cache
     }()
 
+    private static let guidedMaskCache: NSCache<NSString, CGImage> = {
+        let cache = NSCache<NSString, CGImage>()
+        cache.countLimit = 24
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
+
     private let context: CIContext
 
     init() {
@@ -745,10 +752,30 @@ final class ImageRenderer {
             if brush.guidedRefinement, quality != .interactive,
                let maskImage = createCGImage(mask, from: extent),
                let guideImage = createCGImage(base, from: extent),
-               let refined = GuidedMaskRefiner.refine(mask: maskImage, guide: guideImage) {
+               let smallMask = GuidedMaskRefiner.resized(maskImage),
+               let smallGuide = GuidedMaskRefiner.resized(guideImage) {
+                let cacheKey = guidedMaskCacheKey(mask: smallMask, guide: smallGuide)
+                let refined = Self.guidedMaskCache.object(forKey: cacheKey) ?? {
+                    let maskInput = CIImage(cgImage: smallMask)
+                    let guideInput = CIImage(cgImage: smallGuide)
+                    if let gpu = MetalImageProcessor.shared.guidedMask(
+                        mask: maskInput, guide: guideInput, context: context
+                    ), let image = createCGImage(gpu, from: gpu.extent) {
+                        return image
+                    }
+                    return GuidedMaskRefiner.refine(mask: smallMask, guide: smallGuide)
+                }()
+                if let refined {
+                    Self.guidedMaskCache.setObject(refined, forKey: cacheKey,
+                                                   cost: refined.bytesPerRow * refined.height)
+                }
+                if let refined {
                 finalMask = CIImage(cgImage: refined)
-                    .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+                        .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
                     .cropped(to: extent)
+                } else {
+                    finalMask = mask
+                }
             } else {
                 finalMask = mask
             }
@@ -759,6 +786,23 @@ final class ImageRenderer {
             output = blend.outputImage?.cropped(to: extent) ?? base
         }
         return output
+    }
+
+    private func guidedMaskCacheKey(mask: CGImage, guide: CGImage) -> NSString {
+        func digest(_ image: CGImage) -> UInt64 {
+            let data = (image.dataProvider?.data as Data?) ?? Data()
+            var hash: UInt64 = 1469598103934665603
+            let stride = max(1, data.count / 4096)
+            for index in Swift.stride(from: 0, to: data.count, by: stride) {
+                hash ^= UInt64(data[index])
+                hash &*= 1099511628211
+            }
+            hash ^= UInt64(image.width)
+            hash &*= 1099511628211
+            hash ^= UInt64(image.height)
+            return hash
+        }
+        return "\(mask.width)x\(mask.height)-\(digest(mask))-\(digest(guide))" as NSString
     }
 
     private func hasVisibleLocalAdjustment(_ brush: AdjustmentBrush) -> Bool {

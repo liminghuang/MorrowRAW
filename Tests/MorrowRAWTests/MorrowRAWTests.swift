@@ -598,6 +598,23 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(refined.height, 32)
     }
 
+    func testGuidedBrushUsesHighQualityMaskPathWithoutChangingExtent() {
+        let source = CIImage(color: CIColor(red: 0.2, green: 0.3, blue: 0.4))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        var brush = AdjustmentBrush(points: [
+            AdjustmentBrushPoint(x: 0.25, y: 0.5),
+            AdjustmentBrushPoint(x: 0.75, y: 0.5)
+        ])
+        brush.exposure = 0.5
+        brush.guidedRefinement = true
+        var adjustments = ImageAdjustments()
+        adjustments.adjustmentBrushes = [brush]
+        let renderer = ImageRenderer()
+        let rendered = renderer.render(source, adjustments: adjustments, quality: .export)
+        XCTAssertEqual(rendered.extent.integral, source.extent.integral)
+        XCTAssertNotNil(CIContext(options: nil).createCGImage(rendered, from: rendered.extent))
+    }
+
     func testColorCheckerCalibrationSolvesIdentityMatrix() {
         let samples = [
             ColorCheckerSample(measured: SIMD3(1, 0, 0), reference: SIMD3(1, 0, 0)),

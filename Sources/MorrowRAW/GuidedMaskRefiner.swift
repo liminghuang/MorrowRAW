@@ -4,6 +4,21 @@ import CoreGraphics
 /// only for semantic masks during final/export rendering; interactive brush
 /// feedback keeps the cheaper analytic mask.
 enum GuidedMaskRefiner {
+    static func resized(_ image: CGImage, maxDimension: Int = 512) -> CGImage? {
+        let scale = min(1, CGFloat(maxDimension) / CGFloat(max(image.width, image.height)))
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
     static func refine(mask: CGImage, guide: CGImage,
                        radius: Int = 8, epsilon: Float = 0.01) -> CGImage? {
         let width = min(512, max(1, mask.width))

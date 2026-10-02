@@ -93,6 +93,11 @@ final class MetalImageProcessor {
         var iterations: UInt32
     }
 
+    private struct GuidedUniforms {
+        var radius: UInt32
+        var epsilon: Float
+    }
+
     private let device: MTLDevice?
     private let commandQueue: MTLCommandQueue?
     private let nlmPipeline: MTLComputePipelineState?
@@ -100,6 +105,8 @@ final class MetalImageProcessor {
     private let distortionPipeline: MTLComputePipelineState?
     private let teleaPipeline: MTLComputePipelineState?
     private let poissonPipeline: MTLComputePipelineState?
+    private let guidedCoefficientsPipeline: MTLComputePipelineState?
+    private let guidedOutputPipeline: MTLComputePipelineState?
     private let texturePool: TexturePool?
 
     private init() {
@@ -116,6 +123,8 @@ final class MetalImageProcessor {
             distortionPipeline = nil
             teleaPipeline = nil
             poissonPipeline = nil
+            guidedCoefficientsPipeline = nil
+            guidedOutputPipeline = nil
             return
         }
         var nlm: MTLComputePipelineState?
@@ -123,6 +132,8 @@ final class MetalImageProcessor {
         var distortion: MTLComputePipelineState?
         var telea: MTLComputePipelineState?
         var poisson: MTLComputePipelineState?
+        var guidedCoefficients: MTLComputePipelineState?
+        var guidedOutput: MTLComputePipelineState?
         do {
             let library = try device.makeLibrary(source: source, options: nil)
             guard let nlmFunction = library.makeFunction(name: "nonLocalMeans"),
@@ -137,6 +148,8 @@ final class MetalImageProcessor {
                 self.distortionPipeline = nil
                 self.teleaPipeline = nil
                 self.poissonPipeline = nil
+                self.guidedCoefficientsPipeline = nil
+                self.guidedOutputPipeline = nil
                 return
             }
             nlm = try device.makeComputePipelineState(function: nlmFunction)
@@ -149,6 +162,12 @@ final class MetalImageProcessor {
             distortion = try device.makeComputePipelineState(function: distortionFunction)
             telea = try device.makeComputePipelineState(function: teleaFunction)
             poisson = try device.makeComputePipelineState(function: poissonFunction)
+            if let function = library.makeFunction(name: "guidedMaskCoefficients") {
+                guidedCoefficients = try device.makeComputePipelineState(function: function)
+            }
+            if let function = library.makeFunction(name: "guidedMaskOutput") {
+                guidedOutput = try device.makeComputePipelineState(function: function)
+            }
         } catch {
             print("MetalImageProcessor initialization failed: \(error)")
             nlm = nil
@@ -156,12 +175,78 @@ final class MetalImageProcessor {
             distortion = nil
             telea = nil
             poisson = nil
+            guidedCoefficients = nil
+            guidedOutput = nil
         }
         nlmPipeline = nlm
         labPipeline = lab
         distortionPipeline = distortion
         teleaPipeline = telea
         poissonPipeline = poisson
+        guidedCoefficientsPipeline = guidedCoefficients
+        guidedOutputPipeline = guidedOutput
+    }
+
+    func guidedMask(mask: CIImage, guide: CIImage, radius: Int = 8,
+                    epsilon: Float = 0.01, context: CIContext) -> CIImage? {
+        guard let device, let commandQueue, let texturePool,
+              let coefficientsPipeline = guidedCoefficientsPipeline,
+              let outputPipeline = guidedOutputPipeline else { return nil }
+        let extent = mask.extent.integral
+        guard extent == guide.extent.integral else { return nil }
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        guard let maskTexture = texturePool.acquire(width: width, height: height),
+              let guideTexture = texturePool.acquire(width: width, height: height),
+              let coefficients = texturePool.acquire(width: width, height: height),
+              let output = device.makeTexture(descriptor: descriptor),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return nil
+        }
+        context.render(mask, to: maskTexture, commandBuffer: commandBuffer,
+                       bounds: extent, colorSpace: colorSpace)
+        context.render(guide, to: guideTexture, commandBuffer: commandBuffer,
+                       bounds: extent, colorSpace: colorSpace)
+
+        var uniforms = GuidedUniforms(radius: UInt32(max(1, min(12, radius))), epsilon: epsilon)
+        guard let first = guidedEncoder(commandBuffer: commandBuffer,
+                                        pipeline: coefficientsPipeline,
+                                        input: maskTexture, secondary: guideTexture,
+                                        output: coefficients, uniforms: &uniforms,
+                                        width: width, height: height) else {
+            texturePool.recycle(maskTexture)
+            texturePool.recycle(guideTexture)
+            texturePool.recycle(coefficients)
+            return nil
+        }
+        first.endEncoding()
+        guard let second = guidedEncoder(commandBuffer: commandBuffer,
+                                         pipeline: outputPipeline,
+                                         input: guideTexture, secondary: coefficients,
+                                         output: output, uniforms: &uniforms,
+                                         width: width, height: height) else {
+            texturePool.recycle(maskTexture)
+            texturePool.recycle(guideTexture)
+            texturePool.recycle(coefficients)
+            return nil
+        }
+        second.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        texturePool.recycle(maskTexture)
+        texturePool.recycle(guideTexture)
+        texturePool.recycle(coefficients)
+        guard commandBuffer.status == .completed,
+              let result = CIImage(mtlTexture: output, options: [.colorSpace: colorSpace]) else {
+            return nil
+        }
+        return result.transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+            .cropped(to: mask.extent)
     }
 
     func nonLocalMeans(_ image: CIImage, strength: CGFloat, context: CIContext) -> CIImage? {
@@ -422,6 +507,28 @@ final class MetalImageProcessor {
             MTLSize(width: width, height: height, depth: 1),
             threadsPerThreadgroup: MTLSize(width: widthThreads, height: heightThreads, depth: 1)
         )
+        return encoder
+    }
+
+    private func guidedEncoder(commandBuffer: MTLCommandBuffer,
+                               pipeline: MTLComputePipelineState,
+                               input: MTLTexture, secondary: MTLTexture,
+                               output: MTLTexture, uniforms: inout GuidedUniforms,
+                               width: Int, height: Int) -> MTLComputeCommandEncoder? {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(input, index: 0)
+        encoder.setTexture(secondary, index: 1)
+        encoder.setTexture(output, index: 2)
+        withUnsafeBytes(of: &uniforms) { rawBuffer in
+            encoder.setBytes(rawBuffer.baseAddress!,
+                             length: MemoryLayout<GuidedUniforms>.stride, index: 0)
+        }
+        let widthThreads = max(1, min(pipeline.threadExecutionWidth, width))
+        let heightThreads = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / widthThreads, height))
+        encoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: widthThreads,
+                                                               height: heightThreads, depth: 1))
         return encoder
     }
 
