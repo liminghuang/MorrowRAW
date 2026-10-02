@@ -26,6 +26,7 @@ enum ColorSuggestionReason: String, Equatable, CaseIterable {
     case colorDepth
     case highlightProtection
     case shadowLift
+    case subjectBalance
 
     var displayName: String {
         let zh: String
@@ -37,6 +38,7 @@ enum ColorSuggestionReason: String, Equatable, CaseIterable {
         case .colorDepth: zh = "色彩厚度"; en = "Color depth"
         case .highlightProtection: zh = "高光保護"; en = "Highlight protection"
         case .shadowLift: zh = "陰影提亮"; en = "Shadow lift"
+        case .subjectBalance: zh = "主體曝光平衡"; en = "Subject exposure balance"
         }
         return StudioText.localized(zh, en)
     }
@@ -55,6 +57,7 @@ struct NaturalColorSuggestion: Equatable {
     let constancyConfidence: Double
     let constancyAgreementDegrees: Double
     let constancyMethods: [String]
+    let subjectEvidence: SubjectExposureEvidence?
 
     var plan: NaturalColorPlan {
         NaturalColorPlan(
@@ -68,6 +71,12 @@ struct NaturalColorSuggestion: Equatable {
                 "average_saturation": analysis.averageSaturation,
                 "constancy_confidence": constancyConfidence,
                 "constancy_agreement_degrees": constancyAgreementDegrees
+                ,"subject_median_luminance": subjectEvidence?.subjectMedianLuminance ?? 0
+                ,"subject_highlight_luminance": subjectEvidence?.subjectHighlightLuminance ?? 0
+                ,"background_median_luminance": subjectEvidence?.backgroundMedianLuminance ?? 0
+                ,"background_highlight_luminance": subjectEvidence?.backgroundHighlightLuminance ?? 0
+                ,"subject_coverage": subjectEvidence?.subjectCoverage ?? 0
+                ,"subject_confidence": subjectEvidence?.confidence ?? 0
             ],
             exposureDelta: exposureDelta,
             contrastDelta: contrastDelta,
@@ -179,6 +188,7 @@ enum NaturalColorAssistant {
     static func suggest(for image: CGImage) -> NaturalColorSuggestion {
         let samples = ColorSampleBuffer.linearSamples(from: image)
         let analysis = analyze(samples: samples)
+        let subjectEvidence = SubjectExposureAnalyzer.analyze(image)
         let constancy = ColorConstancyAnalyzer.estimate(
             samples: samples.filter { $0.luminance < 0.995 }
         )
@@ -190,7 +200,20 @@ enum NaturalColorAssistant {
         let highlightPenalty = min(1.5, analysis.clippedHighlightFraction * 60)
         let shadowLift = analysis.clippedShadowFraction > 0.08 ? 8.0 : 0
         let shadowBonus = min(0.35, max(0, analysis.clippedShadowFraction - 0.08) * 3)
-        let exposure = min(1.5, max(-1.5, baseExposure - highlightPenalty + shadowBonus))
+        let globalExposure = baseExposure - highlightPenalty + shadowBonus
+        let exposure: Double
+        if let subjectEvidence, subjectEvidence.hasReliableSubject {
+            let subjectTarget = 0.18
+            let subjectExposure = log2(subjectTarget / max(0.04, subjectEvidence.subjectMedianLuminance))
+            let backgroundHighlightPenalty = max(0, subjectEvidence.backgroundHighlightLuminance - 0.72) * 2.2
+            let protection = min(1.0, max(0, 1 - backgroundHighlightPenalty))
+            let confidenceWeight = min(0.78, max(0.35, subjectEvidence.confidence))
+            let subjectContribution = subjectExposure * protection
+            exposure = min(1.5, max(-1.5,
+                globalExposure * (1 - confidenceWeight) + subjectContribution * confidenceWeight))
+        } else {
+            exposure = min(1.5, max(-1.5, globalExposure))
+        }
         let whiteBalanceScale = constancy.isReliable
             ? 1.0
             : min(1, max(0, constancy.confidence / 0.45))
@@ -211,6 +234,7 @@ enum NaturalColorAssistant {
         if vibrance > 2 { reasons.append(.colorDepth) }
         if highlightProtection != 0 { reasons.append(.highlightProtection) }
         if shadowLift != 0 { reasons.append(.shadowLift) }
+        if subjectEvidence?.hasReliableSubject == true { reasons.append(.subjectBalance) }
 
         let confidence = min(constancy.confidence, min(0.96, max(0.35,
             0.45 + min(0.25, Double(analysis.sampleCount) / 65_536) +
@@ -227,7 +251,8 @@ enum NaturalColorAssistant {
             analysis: analysis,
             constancyConfidence: constancy.confidence,
             constancyAgreementDegrees: constancy.agreementDegrees,
-            constancyMethods: constancy.methods
+            constancyMethods: constancy.methods,
+            subjectEvidence: subjectEvidence
         )
     }
 

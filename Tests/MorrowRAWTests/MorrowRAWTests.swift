@@ -486,6 +486,29 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertGreaterThan(suggestion.confidence, 0.3)
     }
 
+    func testSubjectExposureEvidenceProtectsBrightBackground() {
+        guard let image = CGContext(data: nil, width: 96, height: 64,
+                                    bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            XCTFail("Could not create subject exposure fixture")
+            return
+        }
+        image.setFillColor(CGColor(red: 0.95, green: 0.96, blue: 1, alpha: 1))
+        image.fill(CGRect(x: 0, y: 0, width: 96, height: 64))
+        image.setFillColor(CGColor(red: 0.35, green: 0.18, blue: 0.12, alpha: 1))
+        image.fill(CGRect(x: 8, y: 12, width: 30, height: 42))
+        guard let cgImage = image.makeImage() else {
+            XCTFail("Could not finalize subject exposure fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: cgImage)
+        XCTAssertNotNil(suggestion.subjectEvidence)
+        XCTAssertTrue(suggestion.reasons.contains(.subjectBalance))
+        XCTAssertGreaterThanOrEqual(suggestion.exposureDelta, -1.5)
+        XCTAssertLessThanOrEqual(suggestion.exposureDelta, 1.5)
+    }
+
     func testColorConstancyEnsembleAgreesOnNeutralImage() {
         let image = CIImage(color: CIColor(red: 0.45, green: 0.45, blue: 0.45))
             .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))

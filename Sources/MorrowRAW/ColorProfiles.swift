@@ -147,7 +147,8 @@ enum ReferenceColorMatcher {
             analysis: current,
             constancyConfidence: constancy.confidence,
             constancyAgreementDegrees: constancy.agreementDegrees,
-            constancyMethods: constancy.methods
+            constancyMethods: constancy.methods,
+            subjectEvidence: nil
         )
     }
 }

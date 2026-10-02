@@ -790,6 +790,13 @@ private struct StudioInspector: View {
                     "Suggested: Exposure \(exposure) EV, Temp \(temperature) K, Contrast \(contrast)"
                 ))
                 .font(.caption2).foregroundStyle(StudioUI.secondary)
+                if let evidence = suggestion.subjectEvidence, evidence.hasReliableSubject {
+                    Text(StudioText.localized(
+                        "已分離主體／背景：主體中位亮度 \(String(format: "%.3f", evidence.subjectMedianLuminance))，背景高光 \(String(format: "%.3f", evidence.backgroundHighlightLuminance))",
+                        "Subject/background separated: subject median \(String(format: "%.3f", evidence.subjectMedianLuminance)), background highlights \(String(format: "%.3f", evidence.backgroundHighlightLuminance))"
+                    ))
+                    .font(.caption2).foregroundStyle(StudioUI.secondary)
+                }
             }
         }
         StudioSection(title: "Scopes", systemImage: "scope", isExpanded: $scopesOpen) {
