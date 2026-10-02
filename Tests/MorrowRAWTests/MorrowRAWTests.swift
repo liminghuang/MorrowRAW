@@ -514,6 +514,43 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertGreaterThan(suggestion.confidence, 0.3)
     }
 
+    func testNaturalColorSuggestionPreservesSceneContrastAfterApply() {
+        let gradient = CIFilter.linearGradient()
+        gradient.point0 = CGPoint(x: 0, y: 24)
+        gradient.point1 = CGPoint(x: 64, y: 24)
+        gradient.color0 = CIColor(red: 0.08, green: 0.12, blue: 0.18)
+        gradient.color1 = CIColor(red: 0.82, green: 0.76, blue: 0.58)
+        let source = gradient.outputImage!.cropped(to: CGRect(x: 0, y: 0, width: 64, height: 48))
+        let renderer = ImageRenderer()
+        guard let original = renderer.makePreview(source, adjustments: ImageAdjustments()),
+              let originalAnalysis = Optional(NaturalColorAssistant.analyze(original)) else {
+            XCTFail("Could not create natural color contrast fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: original)
+        let applied = suggestion.applying(to: ImageAdjustments())
+        guard let edited = renderer.makePreview(source, adjustments: applied) else {
+            XCTFail("Could not render natural color contrast fixture")
+            return
+        }
+        let editedAnalysis = NaturalColorAssistant.analyze(edited)
+        XCTAssertGreaterThan(editedAnalysis.dynamicRange, originalAnalysis.dynamicRange * 0.62)
+        XCTAssertGreaterThan(editedAnalysis.averageSaturation, 0.04)
+    }
+
+    func testNaturalColorMapperLimitsLogLikeAutoSuggestion() {
+        let plan = NaturalColorPlan(
+            observations: ["background_highlight_luminance": 0.9],
+            exposureDelta: 1.5, contrastDelta: -24,
+            temperatureDelta: 0, tintDelta: 0, vibranceDelta: 0,
+            saturationDelta: 0, confidence: 1,
+            estimatorMethods: ["test"], protectedRegions: ["sky"]
+        )
+        let mapped = NaturalColorAdjustmentMapper.apply(plan, to: ImageAdjustments(), strength: 1)
+        XCTAssertEqual(mapped.exposure, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(mapped.contrast, -6, accuracy: 0.0001)
+    }
+
     func testSubjectExposureEvidenceProtectsBrightBackground() {
         guard let image = CGContext(data: nil, width: 96, height: 64,
                                     bitsPerComponent: 8, bytesPerRow: 0,

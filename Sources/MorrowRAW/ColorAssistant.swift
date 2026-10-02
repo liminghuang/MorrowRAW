@@ -185,14 +185,17 @@ enum NaturalColorAdjustmentMapper {
         // strength slider remains the sole intensity control for compatibility.
         let amount = requestedStrength
         let backgroundHighlight = plan.observations["background_highlight_luminance"] ?? 0
-        var exposure = min(1.5, max(-1.5, plan.exposureDelta))
+        // Natural suggestions are intentionally conservative. The renderer's
+        // highlight shoulder is useful for manual exposure, but a full-strength
+        // auto suggestion should not make a whole RAW look like a log preview.
+        var exposure = min(0.9, max(-1.0, plan.exposureDelta))
         if plan.protectedRegions.contains("sky"), backgroundHighlight > 0.8, exposure > 0 {
             exposure = min(exposure, 0.7)
         }
         var result = source
         result.exposure = min(5, max(-5, source.exposure + exposure * amount))
         result.contrast = min(100, max(-100, source.contrast +
-            min(24, max(-24, plan.contrastDelta)) * amount))
+            min(18, max(-6, plan.contrastDelta)) * amount))
         result.temperature = min(12000, max(2000, source.temperature +
             min(1500, max(-1500, plan.temperatureDelta)) * amount))
         result.tint = min(100, max(-100, source.tint +
@@ -284,7 +287,10 @@ enum NaturalColorAssistant {
         let meanGain = (constancy.correctionGains.x + constancy.correctionGains.y + constancy.correctionGains.z) / 3
         let tint = min(35, max(-35, (meanGain - constancy.correctionGains.y) * 160 * whiteBalanceScale))
         let range = analysis.dynamicRange
-        let contrast = min(24, max(-18, (0.62 - range) * 80))
+        // A wide RAW dynamic range is not evidence that the image needs a
+        // negative contrast curve; limiting this prevents a flat, log-like
+        // result when paired with protected positive exposure.
+        let contrast = min(18, max(-6, (0.62 - range) * 55))
         let highlightProtection = analysis.clippedHighlightFraction > 0.015 ? -10.0 : 0
         let vibrance = analysis.averageSaturation < 0.16 ?
             min(18, (0.16 - analysis.averageSaturation) * 100) : 0
