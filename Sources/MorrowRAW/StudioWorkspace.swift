@@ -1263,6 +1263,13 @@ private struct LocalToolMarkers: View {
                     BrushMaskOverlay(brushes: model.adjustments.adjustmentBrushes,
                                      size: geometry.size)
                 }
+                let createdSemanticRegions = model.semanticRegions.filter {
+                    model.semanticBrushRegionIDs.contains($0.id)
+                }
+                if !createdSemanticRegions.isEmpty {
+                    SemanticRegionOutlineOverlay(regions: createdSemanticRegions,
+                                                 size: geometry.size)
+                }
                 if localTool == .heal, let pendingHealTarget {
                     let point = CGPoint(x: pendingHealTarget.x * geometry.size.width,
                                         y: (1 - pendingHealTarget.y) * geometry.size.height)
@@ -1394,6 +1401,41 @@ private struct BrushMaskOverlay: View {
         }
         if let last = brush.points.last, result.last != last { result.append(last) }
         return result
+    }
+}
+
+private struct SemanticRegionOutlineOverlay: View {
+    let regions: [SemanticRegionSuggestion]
+    let size: CGSize
+
+    var body: some View {
+        Canvas { context, _ in
+            for region in regions {
+                guard let first = region.points.first else { continue }
+                let minX = region.points.map(\.x).min() ?? first.x
+                let maxX = region.points.map(\.x).max() ?? first.x
+                let minY = region.points.map(\.y).min() ?? first.y
+                let maxY = region.points.map(\.y).max() ?? first.y
+                let padding = 0.018
+                let rect = CGRect(
+                    x: max(0, (minX - padding) * size.width),
+                    y: max(0, (1 - maxY - padding) * size.height),
+                    width: min(size.width, (maxX - minX + padding * 2) * size.width),
+                    height: min(size.height, (maxY - minY + padding * 2) * size.height)
+                )
+                let color: Color
+                switch region.kind {
+                case .person: color = .yellow
+                case .skin: color = .orange
+                case .vegetation: color = .green
+                case .sky: color = .cyan
+                }
+                context.stroke(Path(roundedRect: rect, cornerRadius: 7),
+                               with: .color(color.opacity(0.95)),
+                               style: StrokeStyle(lineWidth: 2, dash: [8, 5]))
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

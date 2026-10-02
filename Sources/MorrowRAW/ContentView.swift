@@ -24,6 +24,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var referencePhotoName = ""
     @Published var colorScopes = ColorScopeSnapshot.empty
     @Published var semanticRegions: [SemanticRegionSuggestion] = []
+    @Published var semanticBrushRegionIDs: Set<String> = []
     @Published private(set) var isAnalyzingSemanticRegions = false
     @Published var colorCheckerSamples: [ColorCheckerSample] = []
     @Published var colorCheckerPatchIndex = 0
@@ -461,6 +462,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
+        semanticBrushRegionIDs = []
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -496,6 +498,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
+        semanticBrushRegionIDs = []
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -620,6 +623,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         referencePhotoName = ""
         colorScopes = .empty
         semanticRegions = []
+        semanticBrushRegionIDs = []
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -1257,6 +1261,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         brush.feather = 0.8
         brush.guidedRefinement = true
         adjustments.adjustmentBrushes.append(brush)
+        semanticBrushRegionIDs.insert(region.id)
         scheduleRender()
     }
 
