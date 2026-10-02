@@ -129,14 +129,16 @@ enum BatchAdjustmentService {
     private static func loadAdjustments(for url: URL) throws -> ImageAdjustments {
         var adjustments = ImageAdjustments()
         let path = adjustmentURL(for: url)
-        if FileManager.default.fileExists(atPath: path.path) {
-            try adjustments.load(from: path)
+        if let stored = PhotoEditStore.shared.loadOrMigrate(for: url, copyIndex: 0,
+                                                             legacyURL: path) {
+            adjustments = stored
         }
         return adjustments
     }
 
     private static func save(_ adjustments: ImageAdjustments, for url: URL) throws {
-        try adjustments.save(to: adjustmentURL(for: url))
+        try PhotoEditStore.shared.save(adjustments, for: url, copyIndex: 0,
+                                       legacyURL: adjustmentURL(for: url))
     }
 
     private static func adjustmentURL(for url: URL) -> URL {

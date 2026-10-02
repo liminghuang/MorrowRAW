@@ -322,8 +322,10 @@ final class ImageBatchExporter {
                         let xmlURL = job.url.deletingLastPathComponent()
                             .appendingPathComponent("RAW_TEMP")
                             .appendingPathComponent(job.url.lastPathComponent + ".rawpipe.xml")
-                        if FileManager.default.fileExists(atPath: xmlURL.path) {
-                            try adjustments.load(from: xmlURL)
+                        if let stored = PhotoEditStore.shared.loadOrMigrate(for: job.url,
+                                                                             copyIndex: 0,
+                                                                             legacyURL: xmlURL) {
+                            adjustments = stored
                         }
                         try exporter.export(source: source, adjustments: adjustments, to: job.outputURL,
                                             format: format, quality: quality,

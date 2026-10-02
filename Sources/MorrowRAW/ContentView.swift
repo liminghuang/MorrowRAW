@@ -475,9 +475,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         showOriginal = false
         let xmlURL = adjustmentURL(for: url, copyIndex: copyIndex)
         adjustmentURL = xmlURL
-        if adjustments.cachedExif == nil {
-            adjustments.cachedExif = exif
-        }
+        if adjustments.cachedExif == nil { adjustments.cachedExif = exif }
         scheduleRender()
         prefetchNearbyThumbnails(around: selectedIndex)
     }
@@ -488,12 +486,9 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     private func preparePhotoState(for url: URL, copyIndex: Int) {
         let xmlURL = adjustmentURL(for: url, copyIndex: copyIndex)
         var nextAdjustments = ImageAdjustments()
-        do {
-            if FileManager.default.fileExists(atPath: xmlURL.path) {
-                try nextAdjustments.load(from: xmlURL)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
+        if let stored = PhotoEditStore.shared.loadOrMigrate(for: url, copyIndex: copyIndex,
+                                                             legacyURL: xmlURL) {
+            nextAdjustments = stored
         }
         adjustments = nextAdjustments
         naturalColorSuggestion = nil
@@ -737,7 +732,11 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            try? savedAdjustments.save(to: self?.adjustmentURL ?? URL(fileURLWithPath: "/dev/null"))
+            guard let self, let photoURL = self.currentPhotoURL,
+                  let legacyURL = self.adjustmentURL else { return }
+            try? PhotoEditStore.shared.save(savedAdjustments, for: photoURL,
+                                            copyIndex: self.virtualCopyIndex,
+                                            legacyURL: legacyURL)
         }
     }
 
@@ -1479,8 +1478,10 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func saveCurrentAdjustments() {
-        guard let adjustmentURL else { return }
-        try? adjustments.save(to: adjustmentURL)
+        guard let photoURL = currentPhotoURL, let adjustmentURL else { return }
+        try? PhotoEditStore.shared.save(adjustments, for: photoURL,
+                                        copyIndex: virtualCopyIndex,
+                                        legacyURL: adjustmentURL)
     }
 
     func flushPendingSave() {

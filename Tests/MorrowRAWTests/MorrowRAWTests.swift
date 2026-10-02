@@ -1466,6 +1466,31 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotEqual(original, changed)
     }
 
+    func testPhotoEditStoreMigratesLegacySidecarAndRejectsChangedSource() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("morrow-edit-store-\(UUID().uuidString)")
+        let source = root.appendingPathComponent("image.raw")
+        let legacy = root.appendingPathComponent("RAW_TEMP/image.rawpipe.xml")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(repeating: 7, count: 32).write(to: source)
+        var original = ImageAdjustments()
+        original.exposure = 1.25
+        try original.save(to: legacy)
+        let store = PhotoEditStore(fileManager: FileManager.default,
+                                   rootURL: root.appendingPathComponent("EditStore"))
+        let migrated = store.loadOrMigrate(for: source, copyIndex: 0, legacyURL: legacy)
+        XCTAssertEqual(migrated?.exposure, 1.25)
+
+        var changed = ImageAdjustments()
+        changed.exposure = -1
+        try Data(repeating: 9, count: 64).write(to: source)
+        let rejected = store.loadOrMigrate(for: source, copyIndex: 0, legacyURL: root.appendingPathComponent("missing.xml"))
+        XCTAssertNil(rejected)
+        try store.save(changed, for: source, copyIndex: 0, legacyURL: legacy)
+        XCTAssertEqual(store.loadOrMigrate(for: source, copyIndex: 0, legacyURL: legacy)?.exposure, -1)
+        try? FileManager.default.removeItem(at: root)
+    }
+
     @MainActor
     func testOpeningEmptyRecentFolderClearsPreviouslyLoadedPhoto() throws {
         let root = FileManager.default.temporaryDirectory

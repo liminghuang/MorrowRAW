@@ -31,6 +31,10 @@ struct ImageAdjustments: Equatable {
 
     mutating func load(from url: URL) throws {
         let data = try Data(contentsOf: url)
+        try load(data: data)
+    }
+
+    mutating func load(data: Data) throws {
         let parser = AdjustmentXMLParser()
         try parser.parse(data)
         gradients = parser.gradients
@@ -68,6 +72,13 @@ struct ImageAdjustments: Equatable {
     }
 
     func save(to url: URL) throws {
+        let data = xmlData()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    func xmlData() -> Data {
         let root = XMLElement(name: "RawPipe")
         let placeholder = XMLElement(name: "IsPlaceholder", stringValue: "false")
         let values = XMLElement(name: "Adjustments")
@@ -179,9 +190,7 @@ struct ImageAdjustments: Equatable {
         root.addChild(values)
         let document = XMLDocument(rootElement: root)
         document.characterEncoding = "UTF-8"
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        try document.xmlData(options: [.nodePrettyPrint]).write(to: url, options: .atomic)
+        return document.xmlData(options: [.nodePrettyPrint])
     }
 }
 
