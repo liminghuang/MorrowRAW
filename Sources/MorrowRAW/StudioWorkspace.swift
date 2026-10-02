@@ -245,23 +245,34 @@ private struct StudioCanvas: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(28)
             } else if let preview = model.preview {
-                Image(nsImage: preview).resizable().aspectRatio(contentMode: .fit)
-                    .scaleEffect(model.zoomScale)
-                    .offset(panOffset)
-                    .padding(28)
-            } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
-            let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
-                ? model.semanticRegions : model.activeSemanticBrushRegions
-            if !visibleSemanticRegions.isEmpty {
                 GeometryReader { geometry in
-                    SemanticRegionOutlineOverlay(
-                        regions: visibleSemanticRegions,
-                        size: geometry.size
-                    )
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: preview)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
+                            ? model.semanticRegions : model.activeSemanticBrushRegions
+                        if !visibleSemanticRegions.isEmpty {
+                            SemanticRegionOutlineOverlay(regions: visibleSemanticRegions,
+                                                         size: geometry.size)
+                            Text(StudioText.localized(
+                                "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
+                                "Semantic regions: \(visibleSemanticRegions.count) shown"
+                            ))
+                            .font(.caption.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9).padding(.vertical, 6)
+                            .background(.black.opacity(0.78), in: Capsule())
+                            .padding(12)
+                        }
+                    }
                 }
-                .allowsHitTesting(false)
-                .zIndex(100)
-            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scaleEffect(model.zoomScale)
+                .offset(panOffset)
+                .padding(28)
+            } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
             VStack {
                 if model.isLoadingFolder {
                     HStack(spacing: 10) {
