@@ -843,6 +843,7 @@ private struct StudioInspector: View {
                         .foregroundStyle(StudioUI.secondary)
                     Button(StudioText.localized("建立筆刷", "Create Brush")) {
                         model.applySemanticRegion(region)
+                        localTool = .brush
                     }
                 }
                 .font(.caption)
@@ -1430,6 +1431,8 @@ private struct SemanticRegionOutlineOverlay: View {
                 case .vegetation: color = .green
                 case .sky: color = .cyan
                 }
+                context.fill(Path(roundedRect: rect, cornerRadius: 7),
+                             with: .color(color.opacity(0.08)))
                 context.stroke(Path(roundedRect: rect, cornerRadius: 7),
                                with: .color(color.opacity(0.95)),
                                style: StrokeStyle(lineWidth: 2, dash: [8, 5]))
