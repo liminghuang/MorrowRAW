@@ -1,6 +1,7 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import Metal
 
 enum RenderQuality: Equatable {
     case interactive
@@ -95,6 +96,8 @@ final class ImageRenderer {
             }
         }
 
+        output = materializeExportStage(output, quality: quality)
+
         if !adjustments.gradients.isEmpty {
             output = applyGradients(to: output, gradients: adjustments.gradients)
         }
@@ -106,6 +109,8 @@ final class ImageRenderer {
         if !adjustments.healSpots.isEmpty {
             output = applyHealSpots(to: output, spots: adjustments.healSpots, quality: quality)
         }
+
+        output = materializeExportStage(output, quality: quality)
 
         if adjustments.distortion != 0 {
             output = MetalImageProcessor.shared.brownConrady(
@@ -234,6 +239,32 @@ final class ImageRenderer {
         filter.bVector = CIVector(x: CGFloat(matrix[6]), y: CGFloat(matrix[7]), z: CGFloat(matrix[8]), w: 0)
         filter.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
         return filter.outputImage ?? image
+    }
+
+    /// Export-only checkpoints force expensive Core Image stages into a linear
+    /// FP32 Metal texture. Interactive previews keep their lazy graph so slider
+    /// feedback does not pay for GPU readback/materialization on every change.
+    private func materializeExportStage(_ image: CIImage, quality: RenderQuality) -> CIImage {
+        guard quality == .export,
+              let device = MTLCreateSystemDefaultDevice(),
+              let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) else {
+            return image
+        }
+        let extent = image.extent.integral
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return image }
+        context.render(image, to: texture, commandBuffer: nil, bounds: extent, colorSpace: colorSpace)
+        guard let materialized = CIImage(mtlTexture: texture, options: [.colorSpace: colorSpace]) else {
+            return image
+        }
+        return materialized
+            .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+            .cropped(to: image.extent)
     }
 
     private func applyLuminanceExposureProtection(to image: CIImage, exposure: Double) -> CIImage {

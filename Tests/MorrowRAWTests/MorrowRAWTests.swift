@@ -615,6 +615,19 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertNotNil(CIContext(options: nil).createCGImage(rendered, from: rendered.extent))
     }
 
+    func testExportRenderMaterializesStagesWithoutChangingExtent() {
+        let source = CIImage(color: CIColor(red: 0.18, green: 0.24, blue: 0.32))
+            .cropped(to: CGRect(x: 3, y: 5, width: 48, height: 32))
+        var adjustments = ImageAdjustments()
+        adjustments.exposure = 0.7
+        adjustments.contrast = 12
+        adjustments.shadows = 18
+        adjustments.gradients = [LinearGradient(range: 0.4, exposure: -0.25)]
+        let rendered = ImageRenderer().render(source, adjustments: adjustments, quality: .export)
+        XCTAssertEqual(rendered.extent.integral, source.extent.integral)
+        XCTAssertNotNil(CIContext(options: nil).createCGImage(rendered, from: rendered.extent))
+    }
+
     func testColorCheckerCalibrationSolvesIdentityMatrix() {
         let samples = [
             ColorCheckerSample(measured: SIMD3(1, 0, 0), reference: SIMD3(1, 0, 0)),
