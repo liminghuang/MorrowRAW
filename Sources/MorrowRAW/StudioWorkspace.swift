@@ -250,16 +250,15 @@ private struct StudioCanvas: View {
                     .offset(panOffset)
                     .padding(28)
             } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
-            if !model.semanticBrushRegionIDs.isEmpty {
+            if !model.activeSemanticBrushRegions.isEmpty {
                 GeometryReader { geometry in
                     SemanticRegionOutlineOverlay(
-                        regions: model.semanticRegions.filter {
-                            model.semanticBrushRegionIDs.contains($0.id)
-                        },
+                        regions: model.activeSemanticBrushRegions,
                         size: geometry.size
                     )
                 }
                 .allowsHitTesting(false)
+                .zIndex(100)
             }
             VStack {
                 if model.isLoadingFolder {
@@ -1275,13 +1274,6 @@ private struct LocalToolMarkers: View {
                     BrushMaskOverlay(brushes: model.adjustments.adjustmentBrushes,
                                      size: geometry.size)
                 }
-                let createdSemanticRegions = model.semanticRegions.filter {
-                    model.semanticBrushRegionIDs.contains($0.id)
-                }
-                if !createdSemanticRegions.isEmpty {
-                    SemanticRegionOutlineOverlay(regions: createdSemanticRegions,
-                                                 size: geometry.size)
-                }
                 if localTool == .heal, let pendingHealTarget {
                     let point = CGPoint(x: pendingHealTarget.x * geometry.size.width,
                                         y: (1 - pendingHealTarget.y) * geometry.size.height)
@@ -1421,35 +1413,46 @@ private struct SemanticRegionOutlineOverlay: View {
     let size: CGSize
 
     var body: some View {
-        Canvas { context, _ in
-            for region in regions {
-                guard let first = region.points.first else { continue }
-                let minX = region.points.map(\.x).min() ?? first.x
-                let maxX = region.points.map(\.x).max() ?? first.x
-                let minY = region.points.map(\.y).min() ?? first.y
-                let maxY = region.points.map(\.y).max() ?? first.y
-                let padding = 0.018
-                let rect = CGRect(
-                    x: max(0, (minX - padding) * size.width),
-                    y: max(0, (1 - maxY - padding) * size.height),
-                    width: min(size.width, (maxX - minX + padding * 2) * size.width),
-                    height: min(size.height, (maxY - minY + padding * 2) * size.height)
-                )
-                let color: Color
-                switch region.kind {
-                case .person: color = .yellow
-                case .skin: color = .orange
-                case .vegetation: color = .green
-                case .sky: color = .cyan
-                }
-                context.fill(Path(roundedRect: rect, cornerRadius: 7),
-                             with: .color(color.opacity(0.08)))
-                context.stroke(Path(roundedRect: rect, cornerRadius: 7),
-                               with: .color(color.opacity(0.95)),
-                               style: StrokeStyle(lineWidth: 2, dash: [8, 5]))
+        ZStack {
+            ForEach(regions) { region in
+                outline(for: region)
             }
         }
         .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func outline(for region: SemanticRegionSuggestion) -> some View {
+        if let first = region.points.first {
+            let minX = region.points.map(\.x).min() ?? first.x
+            let maxX = region.points.map(\.x).max() ?? first.x
+            let minY = region.points.map(\.y).min() ?? first.y
+            let maxY = region.points.map(\.y).max() ?? first.y
+            let padding = 0.018
+            let rect = CGRect(
+                x: max(0, (minX - padding) * size.width),
+                y: max(0, (1 - maxY - padding) * size.height),
+                width: min(size.width, max(24, (maxX - minX + padding * 2) * size.width)),
+                height: min(size.height, max(24, (maxY - minY + padding * 2) * size.height))
+            )
+            let color: Color = region.kind == .person ? .yellow
+                : region.kind == .skin ? .orange
+                : region.kind == .vegetation ? .green : .cyan
+            RoundedRectangle(cornerRadius: 8)
+                .fill(color.opacity(0.14))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(color, style: StrokeStyle(lineWidth: 3, dash: [10, 6])))
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+                .overlay(alignment: .topLeading) {
+                    Text(region.kind.displayName)
+                        .font(.caption2.bold())
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(color, in: Capsule())
+                        .offset(x: 4, y: 4)
+                }
+        }
     }
 }
 
