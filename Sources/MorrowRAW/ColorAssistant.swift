@@ -62,8 +62,8 @@ struct NaturalColorSuggestion: Equatable {
     var plan: NaturalColorPlan {
         var protectedRegions: [String] = []
         if subjectEvidence?.backgroundRegion == .sky { protectedRegions.append("sky") }
-        if let subjectRegion = subjectEvidence?.subjectRegion {
-            protectedRegions.append(subjectRegion.rawValue)
+        if let regions = subjectEvidence?.regions {
+            protectedRegions.append(contentsOf: regions.map { $0.kind.rawValue })
         }
         return NaturalColorPlan(
             observations: [
@@ -81,7 +81,12 @@ struct NaturalColorSuggestion: Equatable {
                 "background_median_luminance": subjectEvidence?.backgroundMedianLuminance ?? 0,
                 "background_highlight_luminance": subjectEvidence?.backgroundHighlightLuminance ?? 0,
                 "subject_coverage": subjectEvidence?.subjectCoverage ?? 0,
-                "subject_confidence": subjectEvidence?.confidence ?? 0
+                "subject_confidence": subjectEvidence?.confidence ?? 0,
+                "subject_red": subjectEvidence?.subjectRed ?? 0,
+                "subject_green": subjectEvidence?.subjectGreen ?? 0,
+                "subject_blue": subjectEvidence?.subjectBlue ?? 0,
+                "subject_saturation": subjectEvidence?.subjectSaturation ?? 0,
+                "subject_region_count": Double(subjectEvidence?.regions.count ?? 0)
             ],
             exposureDelta: exposureDelta,
             contrastDelta: contrastDelta,

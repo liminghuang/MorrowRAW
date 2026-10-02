@@ -91,10 +91,8 @@ final class CompatibilityTests: XCTestCase {
                                                    from: JSONEncoder().encode(plan))
         XCTAssertEqual(restored, plan)
         XCTAssertEqual(plan.modelVersion, "1.1")
-        let expectedProtectedRegions = [
-            suggestion.subjectEvidence?.backgroundRegion?.rawValue,
-            suggestion.subjectEvidence?.subjectRegion.rawValue
-        ].compactMap { $0 }
+        let expectedProtectedRegions = (suggestion.subjectEvidence?.backgroundRegion.map { [$0.rawValue] } ?? []) +
+            (suggestion.subjectEvidence?.regions.map { $0.kind.rawValue } ?? [])
         XCTAssertEqual(plan.protectedRegions, expectedProtectedRegions)
     }
 

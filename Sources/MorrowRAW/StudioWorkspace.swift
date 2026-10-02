@@ -801,6 +801,11 @@ private struct StudioInspector: View {
                         "Subject/background separated: subject median \(String(format: "%.3f", evidence.subjectMedianLuminance)), background highlights \(String(format: "%.3f", evidence.backgroundHighlightLuminance))"
                     ))
                     .font(.caption2).foregroundStyle(StudioUI.secondary)
+                    Text(StudioText.localized(
+                        "主體候選：\(evidence.regions.map { $0.kind.displayName }.joined(separator: "、"))；主體彩度 \(String(format: "%.3f", evidence.subjectSaturation))",
+                        "Subject candidates: \(evidence.regions.map { $0.kind.displayName }.joined(separator: ", ")); subject chroma \(String(format: "%.3f", evidence.subjectSaturation))"
+                    ))
+                    .font(.caption2).foregroundStyle(StudioUI.secondary)
                 }
             }
         }
