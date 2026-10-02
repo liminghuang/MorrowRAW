@@ -536,6 +536,19 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertGreaterThan(editedAnalysis.averageSaturation, 0.04)
     }
 
+    func testNaturalColorApplyAddsSubjectFirstLocalAdjustments() {
+        guard let image = solidCGImage(red: 0.8, green: 0.42, blue: 0.18) else {
+            XCTFail("Could not create subject-local adjustment fixture")
+            return
+        }
+        let suggestion = NaturalColorAssistant.suggest(for: image)
+        let applied = suggestion.applying(to: ImageAdjustments())
+        if let evidence = suggestion.subjectEvidence, evidence.hasReliableSubject {
+            XCTAssertTrue(applied.adjustmentBrushes.allSatisfy { $0.guidedRefinement })
+            XCTAssertLessThanOrEqual(applied.adjustmentBrushes.count, 2)
+        }
+    }
+
     func testNaturalColorMapperLimitsLogLikeAutoSuggestion() {
         let plan = NaturalColorPlan(
             observations: ["background_highlight_luminance": 0.9],

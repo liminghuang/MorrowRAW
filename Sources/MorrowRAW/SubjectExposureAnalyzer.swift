@@ -2,6 +2,7 @@ import CoreGraphics
 
 struct SubjectRegionEvidence: Equatable {
     let kind: SemanticRegionKind
+    let points: [AdjustmentBrushPoint]
     let confidence: Double
     let coverage: Double
     let medianLuminance: Double
@@ -25,6 +26,8 @@ struct SubjectRegionEvidence: Equatable {
 
 struct SubjectExposureEvidence: Equatable {
     let regions: [SubjectRegionEvidence]
+    let subjectPoints: [AdjustmentBrushPoint]
+    let backgroundPoints: [AdjustmentBrushPoint]
     let subjectMedianLuminance: Double
     let subjectHighlightLuminance: Double
     let subjectRed: Double
@@ -59,7 +62,8 @@ enum SubjectExposureAnalyzer {
         let measured = candidates.compactMap { region -> SubjectRegionEvidence? in
             let indices = Set(indices(for: region.points, in: grid))
             guard indices.count >= 8, let values = stats(indices.map { grid.samples[$0] }) else { return nil }
-            return SubjectRegionEvidence(kind: region.kind, confidence: region.confidence,
+            return SubjectRegionEvidence(kind: region.kind, points: region.points,
+                                         confidence: region.confidence,
                                          coverage: Double(indices.count) / Double(grid.samples.count),
                                          medianLuminance: values.median,
                                          highlightLuminance: values.highlight,
@@ -90,7 +94,9 @@ enum SubjectExposureAnalyzer {
             selected.map(\.confidence).reduce(0, +) / Double(selected.count) * 0.7 +
             min(0.25, coverage * 2) + (background != nil ? 0.08 : 0)))
         return SubjectExposureEvidence(
-            regions: Array(selected), subjectMedianLuminance: subject.median,
+            regions: Array(selected), subjectPoints: selected.flatMap(\.points),
+            backgroundPoints: background?.points ?? [],
+            subjectMedianLuminance: subject.median,
             subjectHighlightLuminance: subject.highlight, subjectRed: subject.red,
             subjectGreen: subject.green, subjectBlue: subject.blue,
             subjectSaturation: subject.saturation,

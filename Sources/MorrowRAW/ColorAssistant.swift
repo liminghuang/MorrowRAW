@@ -109,7 +109,37 @@ struct NaturalColorSuggestion: Equatable {
     }
 
     func applying(to source: ImageAdjustments, strength: Double = 1) -> ImageAdjustments {
-        NaturalColorAdjustmentMapper.apply(plan, to: source, strength: strength)
+        var result = NaturalColorAdjustmentMapper.apply(plan, to: source, strength: strength)
+        guard let evidence = subjectEvidence, evidence.hasReliableSubject else { return result }
+        let amount = min(2, max(0, strength))
+        guard amount > 0.001 else { return result }
+
+        let subjectResidual = min(0.55, max(-0.55,
+            log2(0.18 / max(0.04, evidence.subjectMedianLuminance)) - exposureDelta)) * 0.55 * amount
+        let subjectVibrance = evidence.subjectRegion == .skin || evidence.subjectRegion == .person
+            ? 0 : min(10, max(0, (0.16 - evidence.subjectSaturation) * 45)) * amount
+        if evidence.subjectPoints.count >= 3,
+           abs(subjectResidual) > 0.02 || subjectVibrance > 0.5 {
+            var brush = AdjustmentBrush(points: evidence.subjectPoints)
+            brush.radiusNorm = 0.045
+            brush.feather = 0.78
+            brush.exposure = subjectResidual
+            brush.vibrance = subjectVibrance
+            brush.guidedRefinement = true
+            result.adjustmentBrushes.append(brush)
+        }
+
+        let backgroundResidual = evidence.backgroundRegion == .sky
+            ? -min(0.45, max(0, evidence.backgroundHighlightLuminance - 0.72) * 1.25) * amount : 0
+        if evidence.backgroundPoints.count >= 3, abs(backgroundResidual) > 0.02 {
+            var brush = AdjustmentBrush(points: evidence.backgroundPoints)
+            brush.radiusNorm = 0.05
+            brush.feather = 0.82
+            brush.exposure = backgroundResidual
+            brush.guidedRefinement = true
+            result.adjustmentBrushes.append(brush)
+        }
+        return result
     }
 }
 
