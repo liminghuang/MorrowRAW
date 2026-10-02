@@ -250,10 +250,12 @@ private struct StudioCanvas: View {
                     .offset(panOffset)
                     .padding(28)
             } else { VStack(spacing: 10) { Image(systemName: "photo.on.rectangle").font(.system(size: 42)); Text(StudioText.openPhotoToEdit).font(.title3) }.foregroundStyle(StudioUI.secondary) }
-            if !model.activeSemanticBrushRegions.isEmpty {
+            let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
+                ? model.semanticRegions : model.activeSemanticBrushRegions
+            if !visibleSemanticRegions.isEmpty {
                 GeometryReader { geometry in
                     SemanticRegionOutlineOverlay(
-                        regions: model.activeSemanticBrushRegions,
+                        regions: visibleSemanticRegions,
                         size: geometry.size
                     )
                 }
