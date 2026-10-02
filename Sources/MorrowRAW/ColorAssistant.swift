@@ -60,7 +60,12 @@ struct NaturalColorSuggestion: Equatable {
     let subjectEvidence: SubjectExposureEvidence?
 
     var plan: NaturalColorPlan {
-        NaturalColorPlan(
+        var protectedRegions: [String] = []
+        if subjectEvidence?.backgroundRegion == .sky { protectedRegions.append("sky") }
+        if let subjectRegion = subjectEvidence?.subjectRegion {
+            protectedRegions.append(subjectRegion.rawValue)
+        }
+        return NaturalColorPlan(
             observations: [
                 "average_luminance": analysis.averageLuminance,
                 "median_luminance": analysis.medianLuminance,
@@ -70,13 +75,13 @@ struct NaturalColorSuggestion: Equatable {
                 "clipped_highlight_fraction": analysis.clippedHighlightFraction,
                 "average_saturation": analysis.averageSaturation,
                 "constancy_confidence": constancyConfidence,
-                "constancy_agreement_degrees": constancyAgreementDegrees
-                ,"subject_median_luminance": subjectEvidence?.subjectMedianLuminance ?? 0
-                ,"subject_highlight_luminance": subjectEvidence?.subjectHighlightLuminance ?? 0
-                ,"background_median_luminance": subjectEvidence?.backgroundMedianLuminance ?? 0
-                ,"background_highlight_luminance": subjectEvidence?.backgroundHighlightLuminance ?? 0
-                ,"subject_coverage": subjectEvidence?.subjectCoverage ?? 0
-                ,"subject_confidence": subjectEvidence?.confidence ?? 0
+                "constancy_agreement_degrees": constancyAgreementDegrees,
+                "subject_median_luminance": subjectEvidence?.subjectMedianLuminance ?? 0,
+                "subject_highlight_luminance": subjectEvidence?.subjectHighlightLuminance ?? 0,
+                "background_median_luminance": subjectEvidence?.backgroundMedianLuminance ?? 0,
+                "background_highlight_luminance": subjectEvidence?.backgroundHighlightLuminance ?? 0,
+                "subject_coverage": subjectEvidence?.subjectCoverage ?? 0,
+                "subject_confidence": subjectEvidence?.confidence ?? 0
             ],
             exposureDelta: exposureDelta,
             contrastDelta: contrastDelta,
@@ -85,7 +90,10 @@ struct NaturalColorSuggestion: Equatable {
             vibranceDelta: vibranceDelta,
             saturationDelta: saturationDelta,
             confidence: confidence,
-            estimatorMethods: constancyMethods
+            estimatorMethods: constancyMethods,
+            modelIdentifier: "morrow.natural-color.classical-ensemble",
+            modelVersion: "1.1",
+            protectedRegions: protectedRegions
         )
     }
 
@@ -96,15 +104,7 @@ struct NaturalColorSuggestion: Equatable {
     }
 
     func applying(to source: ImageAdjustments, strength: Double = 1) -> ImageAdjustments {
-        let amount = min(2, max(0, strength))
-        var result = source
-        result.exposure = min(5, max(-5, source.exposure + exposureDelta * amount))
-        result.contrast = min(100, max(-100, source.contrast + contrastDelta * amount))
-        result.temperature = min(12000, max(2000, source.temperature + temperatureDelta * amount))
-        result.tint = min(100, max(-100, source.tint + tintDelta * amount))
-        result.vibrance = min(100, max(-100, source.vibrance + vibranceDelta * amount))
-        result.saturation = min(100, max(-100, source.saturation + saturationDelta * amount))
-        return result
+        NaturalColorAdjustmentMapper.apply(plan, to: source, strength: strength)
     }
 }
 
@@ -119,6 +119,9 @@ struct NaturalColorPlan: Codable, Equatable {
     let saturationDelta: Double
     let confidence: Double
     let estimatorMethods: [String]
+    let modelIdentifier: String
+    let modelVersion: String
+    let protectedRegions: [String]
 
     init(schemaVersion: Int = 1,
          observations: [String: Double],
@@ -129,7 +132,10 @@ struct NaturalColorPlan: Codable, Equatable {
          vibranceDelta: Double,
          saturationDelta: Double,
          confidence: Double,
-         estimatorMethods: [String]) {
+         estimatorMethods: [String],
+         modelIdentifier: String = "morrow.natural-color.classical-ensemble",
+         modelVersion: String = "1.0",
+         protectedRegions: [String] = []) {
         self.schemaVersion = schemaVersion
         self.observations = observations
         self.exposureDelta = exposureDelta
@@ -140,6 +146,62 @@ struct NaturalColorPlan: Codable, Equatable {
         self.saturationDelta = saturationDelta
         self.confidence = confidence
         self.estimatorMethods = estimatorMethods
+        self.modelIdentifier = modelIdentifier
+        self.modelVersion = modelVersion
+        self.protectedRegions = protectedRegions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, observations, exposureDelta, contrastDelta,
+             temperatureDelta, tintDelta, vibranceDelta, saturationDelta,
+             confidence, estimatorMethods, modelIdentifier, modelVersion,
+             protectedRegions
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        observations = try values.decodeIfPresent([String: Double].self, forKey: .observations) ?? [:]
+        exposureDelta = try values.decodeIfPresent(Double.self, forKey: .exposureDelta) ?? 0
+        contrastDelta = try values.decodeIfPresent(Double.self, forKey: .contrastDelta) ?? 0
+        temperatureDelta = try values.decodeIfPresent(Double.self, forKey: .temperatureDelta) ?? 0
+        tintDelta = try values.decodeIfPresent(Double.self, forKey: .tintDelta) ?? 0
+        vibranceDelta = try values.decodeIfPresent(Double.self, forKey: .vibranceDelta) ?? 0
+        saturationDelta = try values.decodeIfPresent(Double.self, forKey: .saturationDelta) ?? 0
+        confidence = try values.decodeIfPresent(Double.self, forKey: .confidence) ?? 0
+        estimatorMethods = try values.decodeIfPresent([String].self, forKey: .estimatorMethods) ?? []
+        modelIdentifier = try values.decodeIfPresent(String.self, forKey: .modelIdentifier)
+            ?? "morrow.natural-color.classical-ensemble"
+        modelVersion = try values.decodeIfPresent(String.self, forKey: .modelVersion) ?? "1.0"
+        protectedRegions = try values.decodeIfPresent([String].self, forKey: .protectedRegions) ?? []
+    }
+}
+
+enum NaturalColorAdjustmentMapper {
+    static func apply(_ plan: NaturalColorPlan, to source: ImageAdjustments,
+                      strength: Double) -> ImageAdjustments {
+        let requestedStrength = min(2, max(0, strength))
+        // Confidence is surfaced as evidence for the user; the explicit
+        // strength slider remains the sole intensity control for compatibility.
+        let amount = requestedStrength
+        let backgroundHighlight = plan.observations["background_highlight_luminance"] ?? 0
+        var exposure = min(1.5, max(-1.5, plan.exposureDelta))
+        if plan.protectedRegions.contains("sky"), backgroundHighlight > 0.8, exposure > 0 {
+            exposure = min(exposure, 0.7)
+        }
+        var result = source
+        result.exposure = min(5, max(-5, source.exposure + exposure * amount))
+        result.contrast = min(100, max(-100, source.contrast +
+            min(24, max(-24, plan.contrastDelta)) * amount))
+        result.temperature = min(12000, max(2000, source.temperature +
+            min(1500, max(-1500, plan.temperatureDelta)) * amount))
+        result.tint = min(100, max(-100, source.tint +
+            min(35, max(-35, plan.tintDelta)) * amount))
+        result.vibrance = min(100, max(-100, source.vibrance +
+            min(25, max(-25, plan.vibranceDelta)) * amount))
+        result.saturation = min(100, max(-100, source.saturation +
+            min(25, max(-25, plan.saturationDelta)) * amount))
+        return result
     }
 }
 

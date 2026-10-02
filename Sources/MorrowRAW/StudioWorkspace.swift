@@ -775,6 +775,11 @@ private struct StudioInspector: View {
                     "Estimator consensus: \(suggestion.constancyMethods.joined(separator: ", ")); disagreement \(String(format: "%.1f°", suggestion.constancyAgreementDegrees))"
                 ))
                 .font(.caption2).foregroundStyle(StudioUI.secondary)
+                Text(StudioText.localized(
+                    "計畫：\(suggestion.plan.modelIdentifier) v\(suggestion.plan.modelVersion)",
+                    "Plan: \(suggestion.plan.modelIdentifier) v\(suggestion.plan.modelVersion)"
+                ))
+                .font(.caption2).foregroundStyle(StudioUI.secondary)
                 if suggestion.reasons.isEmpty {
                     Text(StudioText.localized("目前影像已接近自然色彩基準。", "The image is already close to the natural color baseline."))
                         .font(.caption2).foregroundStyle(StudioUI.secondary)

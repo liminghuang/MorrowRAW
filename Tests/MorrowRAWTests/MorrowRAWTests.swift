@@ -90,6 +90,34 @@ final class CompatibilityTests: XCTestCase {
         let restored = try? JSONDecoder().decode(NaturalColorPlan.self,
                                                    from: JSONEncoder().encode(plan))
         XCTAssertEqual(restored, plan)
+        XCTAssertEqual(plan.modelVersion, "1.1")
+        let expectedProtectedRegions = [
+            suggestion.subjectEvidence?.backgroundRegion?.rawValue,
+            suggestion.subjectEvidence?.subjectRegion.rawValue
+        ].compactMap { $0 }
+        XCTAssertEqual(plan.protectedRegions, expectedProtectedRegions)
+    }
+
+    func testNaturalColorPlanDecodesLegacyPayloadAndMapperClampsProtectedExposure() throws {
+        let legacy = """
+        {"schemaVersion":1,"observations":{"background_highlight_luminance":0.95},"exposureDelta":1.5,"contrastDelta":40,"temperatureDelta":3000,"tintDelta":50,"vibranceDelta":40,"saturationDelta":40,"confidence":0.8,"estimatorMethods":["legacy"]}
+        """.data(using: .utf8)!
+        let plan = try JSONDecoder().decode(NaturalColorPlan.self, from: legacy)
+        XCTAssertEqual(plan.modelVersion, "1.0")
+        XCTAssertTrue(plan.protectedRegions.isEmpty)
+
+        let protected = NaturalColorPlan(
+            observations: ["background_highlight_luminance": 0.95],
+            exposureDelta: 1.5, contrastDelta: 40, temperatureDelta: 3000,
+            tintDelta: 50, vibranceDelta: 40, saturationDelta: 40,
+            confidence: 0.8, estimatorMethods: ["test"],
+            protectedRegions: ["sky"]
+        )
+        let mapped = NaturalColorAdjustmentMapper.apply(protected,
+                                                        to: ImageAdjustments(), strength: 2)
+        XCTAssertLessThanOrEqual(mapped.exposure, 1.4)
+        XCTAssertLessThanOrEqual(mapped.contrast, 48)
+        XCTAssertLessThanOrEqual(mapped.temperature, 8200)
     }
 
     func testAdjustmentSliderRangesFavorFineControlWithoutChangingPersistedDomain() {
@@ -211,7 +239,7 @@ final class CompatibilityTests: XCTestCase {
     @MainActor
     func testOpeningPhotoLoadsSidecarBeforeBackgroundDecodeCompletes() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("morrow-raw-load-state-(UUID().uuidString)")
+            .appendingPathComponent("morrow-raw-load-state-\(UUID().uuidString)")
         let photo = root.appendingPathComponent("sample.png")
         let cache = root.appendingPathComponent("RAW_TEMP")
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
