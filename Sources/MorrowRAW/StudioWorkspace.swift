@@ -258,7 +258,7 @@ private struct StudioCanvas: View {
                         }
                     }
                     .overlay(alignment: .topLeading) {
-                        if localTool == .brush && !isBrushParameterEditing &&
+                        if model.semanticOverlayVisible &&
                             !visibleSemanticRegions.isEmpty {
                             Text(StudioText.localized(
                                 "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
@@ -974,11 +974,13 @@ private struct StudioInspector: View {
                     if model.healingBrushEnabled { model.toggleHealingBrush() }
                     pendingHealTarget = nil
                     localTool = .brush
+                    model.semanticOverlayVisible = !model.activeSemanticBrushRegions.isEmpty
                 } label: {
                     Label(StudioText.localized("開始筆刷", "Brush On"), systemImage: "paintbrush.fill")
                 }.buttonStyle(.borderedProminent)
                 Button(StudioText.localized("結束筆刷", "Finish Brush")) {
                     model.isBrushParameterEditing = false
+                    model.semanticOverlayVisible = false
                     localTool = .none
                 }
                     .disabled(localTool != .brush)
@@ -997,6 +999,7 @@ private struct StudioInspector: View {
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
                     model.isBrushParameterEditing = editing
+                    model.semanticOverlayVisible = !editing && !model.activeSemanticBrushRegions.isEmpty
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
@@ -1006,6 +1009,7 @@ private struct StudioInspector: View {
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
                     model.isBrushParameterEditing = editing
+                    model.semanticOverlayVisible = !editing && !model.activeSemanticBrushRegions.isEmpty
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
@@ -1031,7 +1035,10 @@ private struct StudioInspector: View {
         StudioAdjustmentSlider(title: title, value: value, range: range,
                                onChange: { model.scheduleRender(recordHistory: false) },
                                onEditingChanged: { editing in
-                                   if isBrushParameter { model.isBrushParameterEditing = editing }
+                                   if isBrushParameter {
+                                       model.isBrushParameterEditing = editing
+                                       model.semanticOverlayVisible = !editing && !model.activeSemanticBrushRegions.isEmpty
+                                   }
                                    if editing { model.beginInteractiveAdjustment() }
                                    else { model.finishInteractiveAdjustment() }
                                })

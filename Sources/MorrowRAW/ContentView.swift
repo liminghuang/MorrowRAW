@@ -27,6 +27,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var semanticBrushRegionIDs: Set<String> = []
     @Published var activeSemanticBrushRegions: [SemanticRegionSuggestion] = []
     @Published var isBrushParameterEditing = false
+    @Published var semanticOverlayVisible = false
     @Published private(set) var isAnalyzingSemanticRegions = false
     @Published var colorCheckerSamples: [ColorCheckerSample] = []
     @Published var colorCheckerPatchIndex = 0
@@ -467,6 +468,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
         isBrushParameterEditing = false
+        semanticOverlayVisible = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -505,6 +507,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
         isBrushParameterEditing = false
+        semanticOverlayVisible = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -632,6 +635,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
         isBrushParameterEditing = false
+        semanticOverlayVisible = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -1273,6 +1277,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         if !activeSemanticBrushRegions.contains(where: { $0.id == region.id }) {
             activeSemanticBrushRegions.append(region)
         }
+        semanticOverlayVisible = true
         scheduleRender()
     }
 
@@ -1387,6 +1392,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     func clearAdjustmentBrushes() {
         guard !adjustments.adjustmentBrushes.isEmpty else { return }
         adjustments.adjustmentBrushes.removeAll()
+        semanticOverlayVisible = false
         scheduleRender()
     }
 
