@@ -21,6 +21,16 @@ cp "$binary_path" "$app_dir/Contents/MacOS/MorrowRAW"
 cp Resources/Info.plist "$app_dir/Contents/Info.plist"
 cp Resources/MorrowRAW.icns "$app_dir/Contents/Resources/MorrowRAW.icns"
 
+resource_bundle="$script_dir/.build/release-arm64/arm64-apple-macosx/release/MorrowRAW_MorrowRAW.bundle"
+if [[ ! -d "$resource_bundle" ]]; then
+    resource_bundle="$script_dir/.build/release-arm64/out/Products/Release/MorrowRAW_MorrowRAW.bundle"
+fi
+if [[ ! -d "$resource_bundle" ]]; then
+    echo "SwiftPM resource bundle not found under .build/release-arm64" >&2
+    exit 1
+fi
+cp -R "$resource_bundle" "$app_dir/Contents/Resources/"
+
 if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
     codesign --force --deep --options runtime --timestamp \
         --sign "$SIGNING_IDENTITY" "$app_dir"
