@@ -1272,6 +1272,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         brush.radiusNorm = 0.045
         brush.feather = 0.8
         brush.guidedRefinement = true
+        brush.semanticKind = region.kind
         adjustments.adjustmentBrushes.append(brush)
         semanticBrushRegionIDs.insert(region.id)
         if !activeSemanticBrushRegions.contains(where: { $0.id == region.id }) {

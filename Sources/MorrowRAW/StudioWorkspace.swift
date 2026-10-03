@@ -245,24 +245,28 @@ private struct StudioCanvas: View {
             } else if let preview = model.preview {
                 let visibleSemanticRegions = model.activeSemanticBrushRegions.isEmpty
                     ? model.semanticRegions : model.activeSemanticBrushRegions
+                let semanticBrushRegions = model.adjustments.adjustmentBrushes.compactMap { brush -> SemanticRegionSuggestion? in
+                    guard let kind = brush.semanticKind, brush.points.count >= 3 else { return nil }
+                    return SemanticRegionSuggestion(kind: kind, confidence: 1, points: brush.points)
+                }
+                let regions = semanticBrushRegions.isEmpty ? visibleSemanticRegions : semanticBrushRegions
                 Image(nsImage: preview)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay {
                         GeometryReader { geometry in
-                            if !visibleSemanticRegions.isEmpty {
-                                SemanticRegionOutlineOverlay(regions: visibleSemanticRegions,
+                            if model.semanticOverlayVisible && !regions.isEmpty {
+                                SemanticRegionOutlineOverlay(regions: regions,
                                                              size: geometry.size)
                             }
                         }
                     }
                     .overlay(alignment: .topLeading) {
-                        if model.semanticOverlayVisible &&
-                            !visibleSemanticRegions.isEmpty {
+                        if model.semanticOverlayVisible && !regions.isEmpty {
                             Text(StudioText.localized(
-                                "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
-                                "Semantic regions: \(visibleSemanticRegions.count) shown"
+                                "人物主體選區：\(regions.count) 個",
+                                "Subject selection: \(regions.count) region(s)"
                             ))
                             .font(.caption.bold())
                             .foregroundStyle(.white)

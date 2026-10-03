@@ -139,7 +139,8 @@ struct ImageAdjustments: Equatable {
                     ("Tint", brush.tint.xmlValue),
                     ("Vibrance", brush.vibrance.xmlValue),
                     ("Saturation", brush.saturation.xmlValue),
-                    ("GuidedRefinement", brush.guidedRefinement ? "true" : "false")
+                    ("GuidedRefinement", brush.guidedRefinement ? "true" : "false"),
+                    ("SemanticKind", brush.semanticKind?.rawValue ?? "")
                 ]
                 for (name, value) in fields { node.addChild(XMLElement(name: name, stringValue: value)) }
                 let points = XMLElement(name: "Points")
@@ -226,6 +227,7 @@ struct AdjustmentBrush: Equatable {
     var vibrance = 0.0
     var saturation = 0.0
     var guidedRefinement = false
+    var semanticKind: SemanticRegionKind?
 }
 
 struct HealSpot: Equatable {
@@ -364,6 +366,10 @@ private final class AdjustmentXMLParser: NSObject, XMLParserDelegate {
         }
         if var brush = currentAdjustmentBrush, elementName == "GuidedRefinement" {
             brush.guidedRefinement = value.lowercased() == "true"
+            currentAdjustmentBrush = brush
+        }
+        if var brush = currentAdjustmentBrush, elementName == "SemanticKind" {
+            brush.semanticKind = SemanticRegionKind(rawValue: value)
             currentAdjustmentBrush = brush
         }
         if elementName == "AdjustmentBrush", let brush = currentAdjustmentBrush {
