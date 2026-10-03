@@ -26,6 +26,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
     @Published var semanticRegions: [SemanticRegionSuggestion] = []
     @Published var semanticBrushRegionIDs: Set<String> = []
     @Published var activeSemanticBrushRegions: [SemanticRegionSuggestion] = []
+    @Published var isBrushParameterEditing = false
     @Published private(set) var isAnalyzingSemanticRegions = false
     @Published var colorCheckerSamples: [ColorCheckerSample] = []
     @Published var colorCheckerPatchIndex = 0
@@ -465,6 +466,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticRegions = []
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
+        isBrushParameterEditing = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -502,6 +504,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticRegions = []
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
+        isBrushParameterEditing = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil
@@ -628,6 +631,7 @@ final class EditorViewModel: ObservableObject, @unchecked Sendable {
         semanticRegions = []
         semanticBrushRegionIDs = []
         activeSemanticBrushRegions = []
+        isBrushParameterEditing = false
         colorCheckerSamples = []
         colorCheckerPatchIndex = 0
         colorCheckerProfile = nil

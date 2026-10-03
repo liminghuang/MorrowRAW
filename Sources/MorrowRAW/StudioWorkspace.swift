@@ -26,7 +26,6 @@ struct StudioWorkspace: View {
     @State private var brushOpen = false
     @State private var versionsOpen = false
     @State private var localTool: LocalToolMode = .none
-    @State private var isBrushParameterEditing = false
     @State private var pendingHealTarget: CGPoint?
 
     var body: some View {
@@ -37,12 +36,11 @@ struct StudioWorkspace: View {
                     .frame(width: 224)
                 Rectangle().fill(StudioUI.divider).frame(width: 1)
                 StudioCanvas(model: model, localTool: $localTool, pendingHealTarget: $pendingHealTarget,
-                             isBrushParameterEditing: isBrushParameterEditing)
+                             isBrushParameterEditing: model.isBrushParameterEditing)
                 Rectangle().fill(StudioUI.divider).frame(width: 1)
                 StudioInspector(model: model, activeTab: $activeTab,
                                 basicOpen: $basicOpen, naturalColorOpen: $naturalColorOpen,
                                 referenceMatchOpen: $referenceMatchOpen,
-                                isBrushParameterEditing: $isBrushParameterEditing,
                                 scopesOpen: $scopesOpen,
                                 semanticOpen: $semanticOpen,
                                 colorCheckerOpen: $colorCheckerOpen,
@@ -723,7 +721,6 @@ private struct StudioInspector: View {
     @Binding var basicOpen: Bool
     @Binding var naturalColorOpen: Bool
     @Binding var referenceMatchOpen: Bool
-    @Binding var isBrushParameterEditing: Bool
     @Binding var scopesOpen: Bool
     @Binding var semanticOpen: Bool
     @Binding var colorCheckerOpen: Bool
@@ -844,38 +841,6 @@ private struct StudioInspector: View {
             }
             .buttonStyle(.bordered)
         }
-        StudioSection(title: StudioText.localized("語意遮罩", "Semantic Masks"),
-                      systemImage: "person.crop.rectangle.badge.plus", isExpanded: $semanticOpen) {
-            Text(StudioText.localized(
-                "使用 Vision 與離線色彩模型辨識人物、天空、皮膚與植物，結果會轉成可編輯筆刷。",
-                "Use Vision and offline color models to detect people, sky, skin, and vegetation as editable brushes."
-            ))
-            .font(.caption).foregroundStyle(StudioUI.secondary)
-            Button {
-                model.analyzeSemanticRegions()
-            } label: {
-                Label(model.isAnalyzingSemanticRegions
-                      ? StudioText.localized("分析中…", "Analyzing…")
-                      : StudioText.localized("分析語意區域", "Analyze Regions"),
-                      systemImage: "wand.and.stars")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.preview == nil || model.isAnalyzingSemanticRegions)
-            ForEach(model.semanticRegions) { region in
-                HStack {
-                    Text(region.kind.displayName)
-                    Spacer()
-                    Text("\(Int((region.confidence * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(StudioUI.secondary)
-                    Button(StudioText.localized("建立筆刷", "Create Brush")) {
-                        model.applySemanticRegion(region)
-                        localTool = .brush
-                    }
-                }
-                .font(.caption)
-            }
-        }
         StudioSection(title: StudioText.basic, systemImage: "slider.horizontal.3", isExpanded: $basicOpen) {
             slider(StudioText.localized("曝光", "Exposure"), $model.adjustments.exposure, -5...5); slider(StudioText.localized("對比", "Contrast"), $model.adjustments.contrast, -100...100); slider(StudioText.localized("亮部", "Highlights"), $model.adjustments.highlights, -100...100); slider(StudioText.localized("暗部", "Shadows"), $model.adjustments.shadows, -100...100); slider(StudioText.localized("白色", "Whites"), $model.adjustments.whites, -100...100); slider(StudioText.localized("黑色", "Blacks"), $model.adjustments.blacks, -100...100)
         }
@@ -975,6 +940,35 @@ private struct StudioInspector: View {
             Text(StudioText.localized("在照片上拖曳建立羽化遮罩，遮罩內的基本調整不會影響整張照片。",
                                      "Paint on the photo to create a feathered mask. Basic adjustments affect only the painted area."))
                 .font(.caption).foregroundStyle(StudioUI.secondary)
+            Text(StudioText.localized(
+                "語意分析會在同一個筆刷工具中建立可視選區。",
+                "Semantic analysis creates visible selections in this same brush tool."
+            ))
+            .font(.caption2).foregroundStyle(StudioUI.secondary)
+            Button {
+                model.analyzeSemanticRegions()
+            } label: {
+                Label(model.isAnalyzingSemanticRegions
+                      ? StudioText.localized("分析中…", "Analyzing…")
+                      : StudioText.localized("分析語意區域", "Analyze Regions"),
+                      systemImage: "wand.and.stars")
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.preview == nil || model.isAnalyzingSemanticRegions)
+            ForEach(model.semanticRegions) { region in
+                HStack {
+                    Text(region.kind.displayName)
+                    Spacer()
+                    Text("\(Int((region.confidence * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(StudioUI.secondary)
+                    Button(StudioText.localized("建立筆刷", "Create Brush")) {
+                        model.applySemanticRegion(region)
+                        localTool = .brush
+                    }
+                }
+                .font(.caption)
+            }
             HStack {
                 Button {
                     if model.healingBrushEnabled { model.toggleHealingBrush() }
@@ -983,7 +977,10 @@ private struct StudioInspector: View {
                 } label: {
                     Label(StudioText.localized("開始筆刷", "Brush On"), systemImage: "paintbrush.fill")
                 }.buttonStyle(.borderedProminent)
-                Button(StudioText.localized("結束筆刷", "Finish Brush")) { localTool = .none }
+                Button(StudioText.localized("結束筆刷", "Finish Brush")) {
+                    model.isBrushParameterEditing = false
+                    localTool = .none
+                }
                     .disabled(localTool != .brush)
                 Button("−") { model.removeLastAdjustmentBrush() }
                     .disabled(model.adjustments.adjustmentBrushes.isEmpty)
@@ -999,7 +996,7 @@ private struct StudioInspector: View {
                 ), range: 8...160,
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
-                    isBrushParameterEditing = editing
+                    model.isBrushParameterEditing = editing
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
@@ -1008,7 +1005,7 @@ private struct StudioInspector: View {
                 ), range: 0...100,
                 onChange: { model.scheduleRender(recordHistory: false) },
                 onEditingChanged: { editing in
-                    isBrushParameterEditing = editing
+                    model.isBrushParameterEditing = editing
                     if editing { model.beginInteractiveAdjustment() }
                     else { model.finishInteractiveAdjustment() }
                 })
@@ -1034,7 +1031,7 @@ private struct StudioInspector: View {
         StudioAdjustmentSlider(title: title, value: value, range: range,
                                onChange: { model.scheduleRender(recordHistory: false) },
                                onEditingChanged: { editing in
-                                   if isBrushParameter { isBrushParameterEditing = editing }
+                                   if isBrushParameter { model.isBrushParameterEditing = editing }
                                    if editing { model.beginInteractiveAdjustment() }
                                    else { model.finishInteractiveAdjustment() }
                                })
