@@ -163,6 +163,10 @@ private struct StudioToolbar: View {
             Button(StudioText.reset) { model.resetAllAdjustments() }
             Menu { exportMenu } label: { Label(StudioText.export, systemImage: "square.and.arrow.up") }
             .disabled(model.preview == nil || model.isExporting || model.isSingleExporting || model.isBatchAdjusting)
+            if model.photos.count > 1 {
+                BatchActionsMenu(model: model)
+                    .disabled(model.isBatchAdjusting || model.isExporting || model.isSingleExporting)
+            }
         }
         .buttonStyle(.bordered)
         .padding(.horizontal, 14).frame(height: 52)
@@ -181,6 +185,39 @@ private struct StudioToolbar: View {
                 Button("PNG") { model.exportAll(format: .png) }
                 Button("TIFF") { model.exportAll(format: .tiff) }
             }
+        }
+    }
+}
+
+private struct BatchActionsMenu: View {
+    @ObservedObject var model: EditorViewModel
+
+    var body: some View {
+        Menu {
+            Section("\(StudioText.selected)（\(model.selectedPhotoIndices.count)）") {
+                Button(StudioText.selectAll) { model.selectAllPhotos() }
+                Button(StudioText.clearSelection) { model.clearPhotoSelection() }
+                Divider()
+                Button(StudioText.copy) { model.copyCurrentAdjustmentsToSelected() }
+                    .disabled(model.selectedPhotoIndices.isEmpty)
+                ForEach(BuiltInPreset.allCases) { preset in
+                    Button("\(preset.displayName) → \(StudioText.selected)") {
+                        model.applyPresetToSelected(preset)
+                    }
+                    .disabled(model.selectedPhotoIndices.isEmpty)
+                }
+            }
+            Divider()
+            Section(StudioText.allPhotos.replacingOccurrences(of: "…", with: "")) {
+                Button(StudioText.copy) { model.copyCurrentAdjustmentsToAll() }
+                ForEach(BuiltInPreset.allCases) { preset in
+                    Button("\(preset.displayName) → \(StudioText.allPhotos.replacingOccurrences(of: "…", with: ""))") {
+                        model.applyPresetToAll(preset)
+                    }
+                }
+            }
+        } label: {
+            Label(StudioText.batch, systemImage: "square.stack.3d.up")
         }
     }
 }
@@ -1540,35 +1577,6 @@ private struct StudioFilmstrip: View {
                             proxy.scrollTo(index, anchor: .center)
                         }
                     }
-            }
-            if model.photos.count > 1 {
-                Menu {
-                    Section("\(StudioText.selected)（\(model.selectedPhotoIndices.count)）") {
-                        Button(StudioText.selectAll) { model.selectAllPhotos() }
-                        Button(StudioText.clearSelection) { model.clearPhotoSelection() }
-                        Divider()
-                        Button(StudioText.copy) { model.copyCurrentAdjustmentsToSelected() }
-                            .disabled(model.selectedPhotoIndices.isEmpty)
-                        ForEach(BuiltInPreset.allCases) { preset in
-                            Button("\(preset.displayName) → \(StudioText.selected)") {
-                                model.applyPresetToSelected(preset)
-                            }
-                            .disabled(model.selectedPhotoIndices.isEmpty)
-                        }
-                    }
-                    Divider()
-                    Section(StudioText.allPhotos.replacingOccurrences(of: "…", with: "")) {
-                        Button(StudioText.copy) { model.copyCurrentAdjustmentsToAll() }
-                        ForEach(BuiltInPreset.allCases) { preset in
-                            Button("\(preset.displayName) → \(StudioText.allPhotos.replacingOccurrences(of: "…", with: ""))") {
-                                model.applyPresetToAll(preset)
-                            }
-                        }
-                    }
-                } label: {
-                    Label(StudioText.batch, systemImage: "square.stack.3d.up")
-                }
-                .disabled(model.isBatchAdjusting || model.isExporting || model.isSingleExporting)
             }
         }.padding(.horizontal, 12).background(StudioUI.panel)
     }
