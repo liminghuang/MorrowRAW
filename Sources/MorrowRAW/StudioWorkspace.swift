@@ -256,18 +256,20 @@ private struct StudioCanvas: View {
                             if !visibleSemanticRegions.isEmpty {
                                 SemanticRegionOutlineOverlay(regions: visibleSemanticRegions,
                                                              size: geometry.size)
-                                Text(StudioText.localized(
-                                    "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
-                                    "Semantic regions: \(visibleSemanticRegions.count) shown"
-                                ))
-                                .font(.caption.bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 9).padding(.vertical, 6)
-                                .background(.black.opacity(0.78), in: Capsule())
-                                .padding(12)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity,
-                                       alignment: .topLeading)
                             }
+                        }
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if !visibleSemanticRegions.isEmpty {
+                            Text(StudioText.localized(
+                                "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
+                                "Semantic regions: \(visibleSemanticRegions.count) shown"
+                            ))
+                            .font(.caption.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9).padding(.vertical, 6)
+                            .background(.black.opacity(0.85), in: Capsule())
+                            .padding(12)
                         }
                     }
                 .scaleEffect(model.zoomScale)

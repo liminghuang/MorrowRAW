@@ -9,8 +9,15 @@ swift build -c release --arch arm64 --build-path "$script_dir/.build/release-arm
 app_dir="$script_dir/dist/MorrowRAW.app"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
-cp .build/release-arm64/arm64-apple-macosx/release/MorrowRAW \
-    "$app_dir/Contents/MacOS/MorrowRAW"
+binary_path="$script_dir/.build/release-arm64/arm64-apple-macosx/release/MorrowRAW"
+if [[ ! -x "$binary_path" ]]; then
+    binary_path="$script_dir/.build/release-arm64/out/Products/Release/MorrowRAW"
+fi
+if [[ ! -x "$binary_path" ]]; then
+    echo "Release executable not found under .build/release-arm64" >&2
+    exit 1
+fi
+cp "$binary_path" "$app_dir/Contents/MacOS/MorrowRAW"
 cp Resources/Info.plist "$app_dir/Contents/Info.plist"
 cp Resources/MorrowRAW.icns "$app_dir/Contents/Resources/MorrowRAW.icns"
 
