@@ -260,7 +260,8 @@ private struct StudioCanvas: View {
                         }
                     }
                     .overlay(alignment: .topLeading) {
-                        if !visibleSemanticRegions.isEmpty {
+                        if localTool == .brush && !isBrushParameterEditing &&
+                            !visibleSemanticRegions.isEmpty {
                             Text(StudioText.localized(
                                 "語意區域：已建立／顯示 \(visibleSemanticRegions.count) 個",
                                 "Semantic regions: \(visibleSemanticRegions.count) shown"
